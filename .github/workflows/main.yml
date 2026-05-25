@@ -1,0 +1,119 @@
+name: 🪟 Windows 2025 Server TEMP RDP
+
+on:
+  workflow_dispatch:
+
+jobs:
+  secure-rdp:
+    runs-on: windows-2025
+    timeout-minutes: 350
+
+    env:
+      RDP_USERNAME: Windows-User
+      RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}   # 🔐 Pulled from GitHub Secrets
+
+    steps:
+      - name: 🖥️ Enable Remote Desktop
+        shell: pwsh
+        run: |
+          Write-Host "🖥️ Enabling Remote Desktop Services..."
+
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+            -Name 'fDenyTSConnections' -Value 0 -Force
+
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+            -Name 'UserAuthentication' -Value 0 -Force
+
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+            -Name 'SecurityLayer' -Value 0 -Force
+
+          netsh advfirewall firewall delete rule name="RDP-Tailscale" | Out-Null
+          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389 | Out-Null
+
+          Restart-Service -Name TermService -Force
+          Write-Host "✅ RDP service restarted & firewall rule added"
+
+      - name: 👤 Create Administrator User
+        shell: pwsh
+        run: |
+          Write-Host "👤 Setting up user: $env:RDP_USERNAME"
+
+          $securePass = ConvertTo-SecureString $env:RDP_PASSWORD -AsPlainText -Force
+
+          if (-not (Get-LocalUser -Name $env:RDP_USERNAME -ErrorAction SilentlyContinue)) {
+              New-LocalUser -Name $env:RDP_USERNAME -Password $securePass -AccountNeverExpires
+              Write-Host "✅ User created successfully"
+          } else {
+              Write-Host "ℹ️ User already exists – reusing"
+          }
+
+          Add-LocalGroupMember -Group "Administrators" -Member $env:RDP_USERNAME -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $env:RDP_USERNAME -ErrorAction SilentlyContinue
+          Write-Host "🔑 User granted Administrator & Remote Desktop rights"
+
+      - name: 🌐 Install Tailscale VPN
+        shell: pwsh
+        run: |
+          Write-Host "🌐 Downloading Tailscale..."
+
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.92.3-amd64.msi"
+          $installerPath = "$env:TEMP\tailscale.msi"
+
+          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+          Remove-Item $installerPath -Force
+
+          Write-Host "✅ Tailscale installed"
+
+      - name: 🔗 Connect to Tailscale Mesh
+        shell: pwsh
+        run: |
+          Write-Host "🔗 Authenticating & joining Tailscale network..."
+
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTHKEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
+
+          $tsIP = $null
+          $retries = 0
+
+          while (-not $tsIP -and $retries -lt 10) {
+              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+              Start-Sleep -Seconds 5
+              $retries++
+          }
+
+          if (-not $tsIP) {
+              Write-Error "❌ Failed to obtain Tailscale IP"
+              exit 1
+          }
+
+          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+          Write-Host "📍 Tailscale IP: $tsIP"
+
+      - name: 🔍 Verify RDP Connectivity
+        shell: pwsh
+        run: |
+          Write-Host "🔍 Testing RDP port 3389 on $env:TAILSCALE_IP..."
+
+          $test = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
+
+          if (-not $test.TcpTestSucceeded) {
+              Write-Error "❌ RDP port is not reachable"
+              exit 1
+          }
+
+          Write-Host "✅ RDP port is open and reachable"
+
+      - name: ⏳ Keep Alive & Display Connection Info
+        shell: pwsh
+        run: |
+          Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          Write-Host "🟢 TEMPORARY RDP SESSION IS READY"
+          Write-Host "👤 Username : $env:RDP_USERNAME"
+          Write-Host "🌐 Tailscale IP : $env:TAILSCALE_IP"
+          Write-Host "🔐 Password : (hidden – see env vars)"
+          Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+          while ($true) {
+              Write-Host "[$(Get-Date -Format 'HH:mm:ss')] 🟢 Session alive..."
+              Start-Sleep -Seconds 300
+          }
