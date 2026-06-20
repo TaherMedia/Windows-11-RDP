@@ -9,7 +9,7 @@ jobs:
     timeout-minutes: 350
 
     env:
-      RDP_USERNAME: Windows-User
+      RDP_USERNAME: ATOMA
       RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}   # 🔐 Pulled from GitHub Secrets
 
     steps:
