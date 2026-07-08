@@ -56,7 +56,7 @@ jobs:
         run: |
           Write-Host "🌐 Downloading Tailscale..."
 
-          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.92.3-amd64.msi"
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.98.8-amd64.msi"
           $installerPath = "$env:TEMP\tailscale.msi"
 
           Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
