@@ -1,4 +1,4 @@
-name: 🍎 macOS GUI via Tailscale VNC
+name: 🍎 macOS VNC Debug
 
 on:
   workflow_dispatch:
@@ -9,32 +9,29 @@ jobs:
     timeout-minutes: 350
 
     env:
-      VNC_USER: "vncuser"
-      VNC_PASS: ${{ secrets.VNC_PASSWORD }}
+      VNC_USERNAME: ATOMA
+      VNC_PASSWORD: ${{ secrets.VNC_PASSWORD }}
 
     steps:
-      - name: 👤 Create VNC User
+      - name: 👤 Create User
         run: |
-          sudo sysadminctl -addUser "$VNC_USER" -password "$VNC_PASS" -admin
-          sudo dscl . -create /Users/"$VNC_USER" UserShell /bin/bash
+          sudo sysadminctl -addUser "$VNC_USERNAME" -password "$VNC_PASSWORD" -admin
+          sudo dscl . -create /Users/"$VNC_USERNAME" UserShell /bin/bash
 
-      - name: 🖥️ Enable Remote Management & Screen Sharing
+      - name: 🖥️ Enable Screen Sharing
         run: |
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -activate -configure -access -on -restart -agent -privs -all -allowAccessFor -allUsers
 
-      - name: 🔑 Set Legacy VNC Password
-        run: |
-          echo "$VNC_PASS" | sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+          echo "$VNC_PASSWORD" | sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -activate -configure -access -on -restart -agent -privs -all \
-            -clientopts -setvnclegacy -vnclegacy yes -setvncpw -vncpw "$VNC_PASS"
+            -clientopts -setvnclegacy -vnclegacy yes -setvncpw -vncpw "$VNC_PASSWORD"
 
-          # Also write to plist (some clients need this)
           sudo /usr/libexec/PlistBuddy -c "Add :VNCLegacyPasswords array" /Library/Preferences/com.apple.RemoteManagement.plist 2>/dev/null || true
           sudo /usr/libexec/PlistBuddy -c "Delete :VNCLegacyPasswords:0" /Library/Preferences/com.apple.RemoteManagement.plist 2>/dev/null || true
           HASH=$(python3 - <<PY
           import hashlib
-          print(hashlib.md5(b"$VNC_PASS").hexdigest())
+          print(hashlib.md5(b"$VNC_PASSWORD").hexdigest())
           PY
           )
           sudo /usr/libexec/PlistBuddy -c "Add :VNCLegacyPasswords:0 data $(echo $HASH | xxd -r -p | base64)" /Library/Preferences/com.apple.RemoteManagement.plist
@@ -42,11 +39,10 @@ jobs:
           sudo launchctl unload /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
           sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist
 
-      - name: 🔥 Disable Firewall (temporary)
-        run: |
-          sudo /usr/libexec/ApplicationFirewall/socketfilterfw --setglobalstate off
+      - name: 🔥 Disable Firewall
+        run: sudo /usr/libexec/ApplicationFirewall/socketfilterfw --setglobalstate off
 
-      - name: 🌐 Install & Start Tailscale
+      - name: 🌐 Install Tailscale
         run: |
           brew install tailscale
           sudo brew services start tailscale
@@ -58,23 +54,32 @@ jobs:
           sleep 10
           TS_IP=$(sudo tailscale ip -4)
           echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
-          echo "📍 Tailscale IP: $TS_IP"
 
-      - name: 🔍 Verify VNC is Listening
+      - name: 📊 Diagnostics
         run: |
-          echo "Checking VNC port 5900..."
-          sudo lsof -i :5900 || echo "⚠️ VNC not listening!"
-          echo "Testing local connection..."
-          nc -zv localhost 5900 && echo "✅ VNC is reachable locally" || echo "❌ VNC not reachable"
+          echo "=== VNC Listening ==="
+          sudo lsof -i :5900
+          echo "=== VNC Password (base64) ==="
+          sudo /usr/libexec/PlistBuddy -c "Print :VNCLegacyPasswords:0" /Library/Preferences/com.apple.RemoteManagement.plist 2>/dev/null || echo "No password plist entry"
+          echo "=== Local Connectivity Test ==="
+          nc -zv localhost 5900 && echo "✅ local port open" || echo "❌ local port closed"
+          echo "=== Tailscale IP ==="
+          echo "$TAILSCALE_IP"
 
       - name: 📋 Connection Info
         run: |
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           echo "🟢 macOS VNC READY"
-          echo "👤 Username: $VNC_USER"
-          echo "🔐 Password: (from secret VNC_PASSWORD)"
-          echo "🌐 VNC Address: ${{ env.TAILSCALE_IP }}:5900"
-          echo "🔌 SSH fallback: ssh $VNC_USER@${{ env.TAILSCALE_IP }}"
+          echo "👤 Username: $VNC_USERNAME"
+          echo "🌐 Tailscale IP: $TAILSCALE_IP"
+          echo "🔐 Password: (stored in secret VNC_PASSWORD)"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "👉 Next steps:"
+          echo "1. On your local machine, run: tailscale status"
+          echo "2. Ping $TAILSCALE_IP"
+          echo "3. SSH: ssh $VNC_USERNAME@$TAILSCALE_IP"
+          echo "4. VNC: connect to $TAILSCALE_IP:5900 with your VNC client"
+          echo "5. If VNC fails, try SSH tunnel: ssh -L 5900:localhost:5900 $VNC_USERNAME@$TAILSCALE_IP"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
       - name: ⏳ Keep Alive
