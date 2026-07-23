@@ -10,7 +10,7 @@ jobs:
 
     env:
       VNC_USER: "vncuser"
-      VNC_PASS: ${{ secrets.VNC_PASSWORD }}
+      VNC_PASS: ${{ secrets.VNC_PASSWORD }}   # Make sure this secret is set!
 
     steps:
       - name: 👤 Create VNC User
@@ -20,39 +20,40 @@ jobs:
 
       - name: 🖥️ Enable Screen Sharing (VNC)
         run: |
-          # Enable the service
+          # Enable Remote Management (includes Screen Sharing)
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -activate -configure -access -on -restart -agent -privs -all -allowAccessFor -allUsers
-          sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
 
       - name: 🔑 Set VNC Password (Legacy VNC)
-        shell: bash
         run: |
-          set -e
-          # Use kickstart to set the legacy VNC password
-          echo "${{ env.VNC_PASS }}" | sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+          # Set legacy VNC password via kickstart
+          echo "$VNC_PASS" | sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -activate -configure -access -on -restart -agent -privs -all \
-            -clientopts -setvnclegacy -vnclegacy yes -setvncpw -vncpw "${{ env.VNC_PASS }}"
+            -clientopts -setvnclegacy -vnclegacy yes -setvncpw -vncpw "$VNC_PASS"
 
-          # Also set the password in the plist file for reliability
+          # Also write to plist for reliability (some clients require it)
           sudo /usr/libexec/PlistBuddy -c "Add :VNCLegacyPasswords array" /Library/Preferences/com.apple.RemoteManagement.plist 2>/dev/null || true
           sudo /usr/libexec/PlistBuddy -c "Delete :VNCLegacyPasswords:0" /Library/Preferences/com.apple.RemoteManagement.plist 2>/dev/null || true
-          HASH=$(python3 - <<'PY'
-          import sys,hashlib
-          print(hashlib.md5(b"${{ env.VNC_PASS }}").hexdigest())
+          HASH=$(python3 - <<PY
+          import hashlib
+          print(hashlib.md5(b"$VNC_PASS").hexdigest())
           PY
           )
           sudo /usr/libexec/PlistBuddy -c "Add :VNCLegacyPasswords:0 data $(echo $HASH | xxd -r -p | base64)" /Library/Preferences/com.apple.RemoteManagement.plist
 
-          # Restart the service to apply changes
+          # Restart service
           sudo launchctl unload /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
           sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist
 
-      - name: 🌐 Install Tailscale
+      - name: 🌐 Install & Start Tailscale
         run: |
           brew install tailscale
+          # Start tailscaled as a background service (launchd)
+          sudo brew services start tailscale
+          # Wait for it to be ready
+          sleep 5
 
-      - name: 🔗 Connect to Tailscale
+      - name: 🔗 Connect to Tailscale Network
         run: |
           sudo tailscale up --authkey="${{ secrets.TAILSCALE_AUTHKEY }}" --hostname="gh-runner-${{ github.run_id }}"
           sleep 10
