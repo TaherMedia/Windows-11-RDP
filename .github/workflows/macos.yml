@@ -1,0 +1,73 @@
+name: 🍎 macOS GUI via Tailscale VNC
+
+on:
+  workflow_dispatch:
+
+jobs:
+  macos-vnc:
+    runs-on: macos-latest
+    timeout-minutes: 350
+
+    env:
+      VNC_USER: "vncuser"
+      VNC_PASS: ${{ secrets.VNC_PASSWORD }}
+
+    steps:
+      - name: 👤 Create VNC User
+        run: |
+          sudo sysadminctl -addUser "$VNC_USER" -password "$VNC_PASS" -admin
+          sudo dscl . -create /Users/"$VNC_USER" UserShell /bin/bash
+
+      - name: 🖥️ Enable Screen Sharing (VNC)
+        run: |
+          # Enable the service
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -activate -configure -access -on -restart -agent -privs -all -allowAccessFor -allUsers
+          sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
+
+      - name: 🔑 Set VNC Password (Legacy VNC)
+        shell: bash
+        run: |
+          set -e
+          # Use kickstart to set the legacy VNC password
+          echo "${{ env.VNC_PASS }}" | sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -activate -configure -access -on -restart -agent -privs -all \
+            -clientopts -setvnclegacy -vnclegacy yes -setvncpw -vncpw "${{ env.VNC_PASS }}"
+
+          # Also set the password in the plist file for reliability
+          sudo /usr/libexec/PlistBuddy -c "Add :VNCLegacyPasswords array" /Library/Preferences/com.apple.RemoteManagement.plist 2>/dev/null || true
+          sudo /usr/libexec/PlistBuddy -c "Delete :VNCLegacyPasswords:0" /Library/Preferences/com.apple.RemoteManagement.plist 2>/dev/null || true
+          HASH=$(python3 - <<'PY'
+          import sys,hashlib
+          print(hashlib.md5(b"${{ env.VNC_PASS }}").hexdigest())
+          PY
+          )
+          sudo /usr/libexec/PlistBuddy -c "Add :VNCLegacyPasswords:0 data $(echo $HASH | xxd -r -p | base64)" /Library/Preferences/com.apple.RemoteManagement.plist
+
+          # Restart the service to apply changes
+          sudo launchctl unload /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
+          sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist
+
+      - name: 🌐 Install Tailscale
+        run: |
+          brew install tailscale
+
+      - name: 🔗 Connect to Tailscale
+        run: |
+          sudo tailscale up --authkey="${{ secrets.TAILSCALE_AUTHKEY }}" --hostname="gh-runner-${{ github.run_id }}"
+          sleep 10
+          TS_IP=$(sudo tailscale ip -4)
+          echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
+          echo "📍 Tailscale IP: $TS_IP"
+
+      - name: 📋 Connection Info
+        run: |
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "🟢 macOS VNC READY"
+          echo "👤 Username: $VNC_USER"
+          echo "🔐 Password: (from secret VNC_PASSWORD)"
+          echo "🌐 VNC Address: ${{ env.TAILSCALE_IP }}:5900"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+      - name: ⏳ Keep Alive
+        run: while true; do echo "[$(date +%H:%M:%S)] 🟢 Alive"; sleep 300; done
