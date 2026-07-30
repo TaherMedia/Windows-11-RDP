@@ -1,0 +1,144 @@
+name: 🍎 macOS TEMP VNC
+
+on:
+  workflow_dispatch:
+    inputs:
+      session_minutes:
+        description: "How long to keep the session alive (minutes)"
+        required: false
+        default: "60"
+
+jobs:
+  secure-vnc:
+    runs-on: macos-15
+    timeout-minutes: 90
+
+    env:
+      VNC_USERNAME: ATOMA
+      VNC_PASSWORD: ${{ secrets.VNC_PASSWORD }}   # 🔐 Pulled from GitHub Secrets
+
+    steps:
+      - name: 🖥️ Enable Screen Sharing (VNC) + Remote Login
+        run: |
+          echo "🖥️ Enabling Screen Sharing (VNC)..."
+
+          # Screen Sharing = macOS's native VNC server (ARD/VNC-compatible)
+          sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -activate -configure -access -on \
+            -restart -agent -privs -all
+
+          # Also enable Remote Login (SSH) as a fallback control channel
+          sudo systemsetup -setremotelogin on
+
+          echo "✅ Screen Sharing + Remote Login enabled"
+
+      - name: 👤 Create Administrator User
+        run: |
+          echo "👤 Setting up user: $VNC_USERNAME"
+
+          if ! id "$VNC_USERNAME" &>/dev/null; then
+            LAST_UID=$(dscl . -list /Users UniqueID | awk '{print $2}' | sort -n | tail -1)
+            NEW_UID=$((LAST_UID + 1))
+
+            sudo dscl . -create /Users/$VNC_USERNAME
+            sudo dscl . -create /Users/$VNC_USERNAME UserShell /bin/zsh
+            sudo dscl . -create /Users/$VNC_USERNAME RealName "$VNC_USERNAME"
+            sudo dscl . -create /Users/$VNC_USERNAME UniqueID "$NEW_UID"
+            sudo dscl . -create /Users/$VNC_USERNAME PrimaryGroupID 80
+            sudo dscl . -create /Users/$VNC_USERNAME NFSHomeDirectory /Users/$VNC_USERNAME
+            sudo dscl . -passwd /Users/$VNC_USERNAME "$VNC_PASSWORD"
+
+            sudo createhomedir -c -u $VNC_USERNAME >/dev/null
+
+            echo "✅ User created successfully"
+          else
+            echo "ℹ️ User already exists – updating password"
+            sudo dscl . -passwd /Users/$VNC_USERNAME "$VNC_PASSWORD"
+          fi
+
+          sudo dscl . -append /Groups/admin GroupMembership $VNC_USERNAME
+          sudo dscl . -append /Groups/com.apple.access_screensharing GroupMembership $VNC_USERNAME
+
+          echo "🔑 User granted Administrator & Screen Sharing rights"
+
+      - name: 🌐 Install Tailscale VPN (Homebrew)
+        run: |
+          echo "🌐 Installing Tailscale via Homebrew..."
+
+          brew install --formula tailscale
+          sudo brew services start tailscale
+
+          # Wait for the daemon socket to come up
+          for i in $(seq 1 20); do
+            if sudo tailscale status >/dev/null 2>&1; then
+              break
+            fi
+            sleep 2
+          done
+
+          echo "✅ Tailscale installed and daemon running"
+
+      - name: 🔗 Connect to Tailscale Mesh
+        run: |
+          echo "🔗 Authenticating & joining Tailscale network..."
+
+          sudo tailscale up \
+            --authkey=${{ secrets.TAILSCALE_AUTHKEY }} \
+            --hostname=gh-runner-macos-$GITHUB_RUN_ID \
+            --accept-risk=all
+
+          TS_IP=""
+          RETRIES=0
+
+          while [ -z "$TS_IP" ] && [ $RETRIES -lt 10 ]; do
+            TS_IP=$(sudo tailscale ip -4)
+            sleep 5
+            RETRIES=$((RETRIES + 1))
+          done
+
+          if [ -z "$TS_IP" ]; then
+            echo "❌ Failed to obtain Tailscale IP"
+            exit 1
+          fi
+
+          echo "TAILSCALE_IP=$TS_IP" >> "$GITHUB_ENV"
+          echo "📍 Tailscale IP: $TS_IP"
+
+      - name: 🔍 Verify VNC Connectivity
+        run: |
+          echo "🔍 Testing VNC port 5900 on $TAILSCALE_IP..."
+
+          for i in $(seq 1 10); do
+            if nc -z -w3 "$TAILSCALE_IP" 5900; then
+              echo "✅ VNC port is open and reachable"
+              exit 0
+            fi
+            sleep 3
+          done
+
+          echo "❌ VNC port is not reachable"
+          exit 1
+
+      - name: ⏳ Session Alive & Connection Info
+        run: |
+          MINUTES="${{ github.event.inputs.session_minutes }}"
+          MINUTES="${MINUTES:-60}"
+          END=$((SECONDS + MINUTES * 60))
+
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "🟢 TEMPORARY VNC SESSION IS READY"
+          echo "👤 Username      : $VNC_USERNAME"
+          echo "🌐 Tailscale IP  : $TAILSCALE_IP"
+          echo "🔌 VNC Port      : 5900"
+          echo "🔐 Password      : (hidden – see repo secrets)"
+          echo "⏱️  Duration      : ${MINUTES} minutes"
+          echo "📎 Connect       : vnc://$TAILSCALE_IP:5900"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+          while [ $SECONDS -lt $END ]; do
+            echo "[$(date '+%H:%M:%S')] 🟢 Session alive... ($(( (END - SECONDS) / 60 )) min remaining)"
+            sleep 60
+          done
+
+          echo "⏹️ Session duration reached — job will now end and the runner will be destroyed."
