@@ -10,8 +10,8 @@ on:
 
 jobs:
   secure-vnc:
-    runs-on: macos-15
-    timeout-minutes: 90
+    runs-on: macos-26
+    timeout-minutes: 350
 
     env:
       VNC_USERNAME: ATOMA
@@ -25,17 +25,34 @@ jobs:
           # Screen Sharing = macOS's native VNC server (ARD/VNC-compatible)
           sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -activate -configure -access -on \
-            -clientopts -setvnclegacy -vnclegacy yes \
-            -clientopts -setvncpw -vncpw "$VNC_PASSWORD" \
-            -restart -agent -privs -all
+            -activate -configure -access -on -privs -all
 
-          # ⚠️ NOTE: the legacy VNC password protocol only uses the first 8
-          # characters of whatever you set here — that's a hard limit of the
-          # classic VNC auth scheme, not a bug in this script. If VNC_PASSWORD
-          # is longer than 8 characters, only the first 8 matter for VNC
-          # login. Keep the secret to 8 chars (or expect the first 8 to be
-          # what you actually type in the VNC client).
+          # Turn on legacy VNC (classic RFB password auth that any standard
+          # VNC viewer understands, not just Apple's own Screen Sharing app)
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -configure -clientopts -setvnclegacy -vnclegacy yes
+
+          # ⚠️ kickstart's own "-setvncpw" flag is unreliable on macOS 10.14+
+          # (well documented for a decade: it prints "Done" but often doesn't
+          # actually set the password VNC clients check against). The fix
+          # that reliably works is writing the same DES-obfuscated password
+          # hash Apple's own Sharing preference pane writes, straight to the
+          # prefs file it reads from:
+          echo "$VNC_PASSWORD" | perl -we 'BEGIN { @k = unpack "C*", pack "H*", "1734516E8BA8C5E2FF1C39567390ADCA"}; $_ = <>; chomp; s/^(.{8}).*/$1/; @p = unpack "C*", $_; foreach (@k) { printf "%02X", $_ ^ (shift @p || 0) }; print "\n"' | sudo tee /Library/Preferences/com.apple.VNCSettings.txt >/dev/null
+
+          # Restart the agent so the new password + legacy setting actually load
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -restart -agent -console
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -activate
+
+          # ⚠️ Same 8-character hard limit as before — that's the classic
+          # VNC/DES auth scheme itself, only the first 8 chars of
+          # VNC_PASSWORD matter for what you type into the VNC client.
+
+          # Stop the display from sleeping/blanking for the session — a
+          # common cause of "authenticated fine but the screen is black"
+          MINUTES_GUARD="${{ github.event.inputs.session_minutes }}"
+          MINUTES_GUARD="${MINUTES_GUARD:-60}"
+          nohup caffeinate -disu -t $((MINUTES_GUARD * 60 + 600)) > /dev/null 2>&1 &
 
           # Also enable Remote Login (SSH) as a fallback control channel
           sudo systemsetup -setremotelogin on
@@ -133,6 +150,10 @@ jobs:
         run: |
           MINUTES="${{ github.event.inputs.session_minutes }}"
           MINUTES="${MINUTES:-60}"
+          if [ "$MINUTES" -gt 335 ]; then
+            echo "⚠️ session_minutes capped at 335 (job timeout-minutes is 350; this leaves headroom for setup/teardown)"
+            MINUTES=335
+          fi
           END=$((SECONDS + MINUTES * 60))
 
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
