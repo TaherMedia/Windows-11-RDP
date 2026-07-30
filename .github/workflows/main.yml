@@ -2,6 +2,11 @@ name: 🪟 Windows 2025 Server TEMP RDP
 
 on:
   workflow_dispatch:
+    inputs:
+      session_minutes:
+        description: "How long to keep the session alive (minutes)"
+        required: false
+        default: "60"
 
 jobs:
   secure-rdp:
@@ -56,6 +61,10 @@ jobs:
         run: |
           Write-Host "🌐 Downloading Tailscale..."
 
+          # Pinned version checked against Tailscale's own stable package
+          # index at time of writing — still current on the Windows/MSI
+          # track, not stale (macOS Homebrew was one patch ahead, which is
+          # normal cross-channel lag, not a sign this URL is out of date).
           $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.98.8-amd64.msi"
           $installerPath = "$env:TEMP\tailscale.msi"
 
@@ -103,17 +112,78 @@ jobs:
 
           Write-Host "✅ RDP port is open and reachable"
 
+      - name: 📲 Install Telegram Desktop (latest)
+        shell: pwsh
+        run: |
+          Write-Host "📲 Downloading latest Telegram Desktop..."
+
+          # telegram.org's own redirect always serves the current release —
+          # no version number to go stale, same pattern as the Tailscale step.
+          $tgUrl = "https://telegram.org/dl/desktop/win64"
+          $tgInstaller = "$env:TEMP\tsetup.exe"
+
+          Invoke-WebRequest -Uri $tgUrl -OutFile $tgInstaller
+
+          Write-Host "📲 Installing Telegram Desktop silently..."
+          # Telegram's installer is Inno Setup based; these are its documented
+          # unattended flags (verified current as of mid-2026 guides).
+          Start-Process -FilePath $tgInstaller -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART" -Wait
+
+          Remove-Item $tgInstaller -Force
+          Write-Host "✅ Telegram Desktop installed"
+
+      - name: ☁️ Install Cloudflare WARP (1.1.1.1)
+        shell: pwsh
+        run: |
+          Write-Host "☁️ Downloading latest Cloudflare WARP..."
+
+          # Cloudflare's own release CDN — no version number in the path,
+          # always serves the current build.
+          $warpUrl = "https://1111-releases.cloudflareclient.com/windows/Cloudflare_WARP_Release-x64.msi"
+          $warpInstaller = "$env:TEMP\warp.msi"
+
+          Invoke-WebRequest -Uri $warpUrl -OutFile $warpInstaller
+
+          Write-Host "☁️ Installing Cloudflare WARP silently..."
+          Start-Process msiexec.exe -ArgumentList "/i", "`"$warpInstaller`"", "/quiet", "/norestart" -Wait
+
+          Remove-Item $warpInstaller -Force
+
+          # ⚠️ Deliberately installed but NOT auto-connected. WARP is a
+          # full-tunnel VPN — if it auto-connects it can take over the
+          # default route and cut the Tailscale path this RDP session is
+          # running over, locking you out mid-session. Toggle it on
+          # manually from inside the desktop once you're already connected,
+          # so if it does affect routing, you're there to see it happen.
+          Write-Host "✅ Cloudflare WARP installed (left disconnected on purpose — see comment above)"
+
       - name: ⏳ Keep Alive & Display Connection Info
         shell: pwsh
         run: |
+          $minutesInput = "${{ github.event.inputs.session_minutes }}"
+          if ([string]::IsNullOrWhiteSpace($minutesInput)) { $minutesInput = "60" }
+          $minutes = [int]$minutesInput
+
+          if ($minutes -gt 335) {
+              Write-Host "⚠️ session_minutes capped at 335 (job timeout-minutes is 350; this leaves headroom for setup/teardown)"
+              $minutes = 335
+          }
+
+          $endTime = (Get-Date).AddMinutes($minutes)
+
           Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           Write-Host "🟢 TEMPORARY RDP SESSION IS READY"
-          Write-Host "👤 Username : $env:RDP_USERNAME"
-          Write-Host "🌐 Tailscale IP : $env:TAILSCALE_IP"
-          Write-Host "🔐 Password : (hidden – see env vars)"
+          Write-Host "👤 Username      : $env:RDP_USERNAME"
+          Write-Host "🌐 Tailscale IP  : $env:TAILSCALE_IP"
+          Write-Host "🔐 Password      : (hidden – see repo secrets)"
+          Write-Host "⏱️  Duration      : $minutes minutes"
+          Write-Host "📲 Telegram Desktop installed | ☁️ Cloudflare WARP installed (off)"
           Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-          while ($true) {
-              Write-Host "[$(Get-Date -Format 'HH:mm:ss')] 🟢 Session alive..."
+          while ((Get-Date) -lt $endTime) {
+              $remaining = [math]::Ceiling((New-TimeSpan -Start (Get-Date) -End $endTime).TotalMinutes)
+              Write-Host "[$(Get-Date -Format 'HH:mm:ss')] 🟢 Session alive... ($remaining min remaining)"
               Start-Sleep -Seconds 300
           }
+
+          Write-Host "⏹️ Session duration reached — job will now end and the runner will be destroyed."
