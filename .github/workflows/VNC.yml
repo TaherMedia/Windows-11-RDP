@@ -6,7 +6,7 @@ on:
       session_minutes:
         description: "How long to keep the session alive (minutes)"
         required: false
-        default: "60"
+        default: "360"
 
 jobs:
   setup-vnc:
@@ -22,6 +22,7 @@ jobs:
       - name: 🖥️ Enable Remote Desktop
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
           Write-Host "🖥️ Enabling Remote Desktop Services..."
 
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
@@ -42,6 +43,7 @@ jobs:
       - name: 👤 Create Administrator User
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
           Write-Host "👤 Setting up user: $env:RDP_USERNAME"
 
           $securePass = ConvertTo-SecureString $env:RDP_PASSWORD -AsPlainText -Force
@@ -68,7 +70,7 @@ jobs:
 
           Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
           Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
-          Remove-Item $installerPath -Force
+          Remove-Item $installerPath -Force -ErrorAction SilentlyContinue
 
           Write-Host "✅ Tailscale installed"
 
@@ -124,7 +126,7 @@ jobs:
               try {
                   Write-Host "📲 Trying WinGet first..."
                   winget source update | Out-Null
-                  winget install --id Telegram.TelegramDesktop -e --silent --accept-package-agreements --accept-source-agreements --scope machine
+                  winget install --id Telegram.TelegramDesktop -e --silent --accept-package-agreements --accept-source-agreements
                   $installed = $true
                   Write-Host "✅ Telegram Desktop installed with WinGet"
               }
@@ -150,7 +152,8 @@ jobs:
 
               $installed =
                 (Test-Path "$env:ProgramFiles\Telegram Desktop\Telegram.exe") -or
-                (Test-Path "$env:LOCALAPPDATA\Programs\Telegram Desktop\Telegram.exe")
+                (Test-Path "$env:LOCALAPPDATA\Programs\Telegram Desktop\Telegram.exe") -or
+                (Get-Command Telegram -ErrorAction SilentlyContinue)
 
               Remove-Item $tgInstaller -Force -ErrorAction SilentlyContinue
           }
@@ -176,7 +179,7 @@ jobs:
           Write-Host "☁️ Installing Cloudflare WARP silently..."
           Start-Process msiexec.exe -ArgumentList "/i", "`"$warpInstaller`"", "/quiet", "/norestart" -Wait
 
-          Remove-Item $warpInstaller -Force
+          Remove-Item $warpInstaller -Force -ErrorAction SilentlyContinue
 
           Write-Host "✅ Cloudflare WARP installed (left disconnected on purpose)"
 
@@ -209,6 +212,11 @@ jobs:
           $ErrorActionPreference = "Stop"
           $vncPath = "C:\Program Files\uvnc bvba\UltraVNC"
           if (!(Test-Path $vncPath)) { $vncPath = "C:\Program Files\UltraVNC" }
+
+          if (!(Test-Path $vncPath)) {
+              Write-Error "❌ UltraVNC folder not found"
+              exit 1
+          }
 
           $iniFile = Join-Path $vncPath "ultravnc.ini"
           $url = "https://gitlab.com/MR.English2008/avica/-/raw/main/ultravnc.ini"
@@ -259,7 +267,7 @@ jobs:
           $minutes = [int]$minutesInput
 
           if ($minutes -gt 335) {
-              Write-Host "⚠️ session_minutes capped at 335 (job timeout-minutes is 350; this leaves headroom for setup/teardown)"
+              Write-Host "⚠️ session_minutes capped at 335 (job timeout-minutes is 350)"
               $minutes = 335
           }
 
@@ -269,6 +277,9 @@ jobs:
           Write-Host "🟢 TEMPORARY VNC SESSION IS READY"
           Write-Host "👤 Username      : $env:RDP_USERNAME"
           Write-Host "🌐 Tailscale IP  : $env:TAILSCALE_IP"
+          Write-Host "🔌 VNC Port      : 5900"
+          Write-Host "🔗 VNC Link      : vnc://$($env:TAILSCALE_IP):5900"
+          Write-Host "🧷 VNC Import    : $($env:TAILSCALE_IP):5900"
           Write-Host "🔐 Password      : (hidden – see repo secrets)"
           Write-Host "⏱️  Duration      : $minutes minutes"
           Write-Host "📲 Telegram Desktop installed"
@@ -281,4 +292,4 @@ jobs:
               Start-Sleep -Seconds 300
           }
 
-          Write-Host "⏹️ Session duration reached — job will now end and the runner will be destroyed."
+          Write-Host "⏹️ Session duration reached — job will now end."
