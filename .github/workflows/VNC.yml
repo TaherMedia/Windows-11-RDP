@@ -1,0 +1,284 @@
+name: 🪟 Windows 11 UltraVNC TEMP
+
+on:
+  workflow_dispatch:
+    inputs:
+      session_minutes:
+        description: "How long to keep the session alive (minutes)"
+        required: false
+        default: "60"
+
+jobs:
+  setup-vnc:
+    runs-on: windows-2025
+    timeout-minutes: 350
+
+    env:
+      RDP_USERNAME: ATOMA
+      RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
+      VNC_PASSWORD: ${{ secrets.RDP_PASSWORD }}
+
+    steps:
+      - name: 🖥️ Enable Remote Desktop
+        shell: pwsh
+        run: |
+          Write-Host "🖥️ Enabling Remote Desktop Services..."
+
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+            -Name 'fDenyTSConnections' -Value 0 -Force
+
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+            -Name 'UserAuthentication' -Value 0 -Force
+
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+            -Name 'SecurityLayer' -Value 0 -Force
+
+          netsh advfirewall firewall delete rule name="RDP-Tailscale" | Out-Null
+          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389 | Out-Null
+
+          Restart-Service -Name TermService -Force
+          Write-Host "✅ RDP service restarted & firewall rule added"
+
+      - name: 👤 Create Administrator User
+        shell: pwsh
+        run: |
+          Write-Host "👤 Setting up user: $env:RDP_USERNAME"
+
+          $securePass = ConvertTo-SecureString $env:RDP_PASSWORD -AsPlainText -Force
+
+          if (-not (Get-LocalUser -Name $env:RDP_USERNAME -ErrorAction SilentlyContinue)) {
+              New-LocalUser -Name $env:RDP_USERNAME -Password $securePass -AccountNeverExpires -PasswordNeverExpires
+              Write-Host "✅ User created successfully"
+          } else {
+              Write-Host "ℹ️ User already exists – reusing"
+          }
+
+          Add-LocalGroupMember -Group "Administrators" -Member $env:RDP_USERNAME -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $env:RDP_USERNAME -ErrorAction SilentlyContinue
+          Write-Host "🔑 User granted Administrator & Remote Desktop rights"
+
+      - name: 🌐 Install Tailscale VPN
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Write-Host "🌐 Downloading Tailscale..."
+
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.102.2-amd64.msi"
+          $installerPath = "$env:TEMP\tailscale.msi"
+
+          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+          Remove-Item $installerPath -Force
+
+          Write-Host "✅ Tailscale installed"
+
+      - name: 🔗 Connect to Tailscale Mesh
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Write-Host "🔗 Authenticating & joining Tailscale network..."
+
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTHKEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
+
+          $tsIP = $null
+          $retries = 0
+
+          while (-not $tsIP -and $retries -lt 10) {
+              $tsIP = (& "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4 | Select-Object -First 1).Trim()
+              Start-Sleep -Seconds 5
+              $retries++
+          }
+
+          if (-not $tsIP) {
+              Write-Error "❌ Failed to obtain Tailscale IP"
+              exit 1
+          }
+
+          "TAILSCALE_IP=$tsIP" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "📍 Tailscale IP: $tsIP"
+
+      - name: 🔍 Verify Tailscale Connectivity
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Write-Host "🔍 Testing RDP port 3389 on $env:TAILSCALE_IP..."
+
+          $test = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
+
+          if (-not $test.TcpTestSucceeded) {
+              Write-Error "❌ RDP port is not reachable"
+              exit 1
+          }
+
+          Write-Host "✅ RDP port is open and reachable"
+
+      - name: 📲 Install Telegram Desktop
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Write-Host "📲 Installing Telegram Desktop..."
+
+          $installed = $false
+
+          if (Get-Command winget -ErrorAction SilentlyContinue) {
+              try {
+                  Write-Host "📲 Trying WinGet first..."
+                  winget source update | Out-Null
+                  winget install --id Telegram.TelegramDesktop -e --silent --accept-package-agreements --accept-source-agreements --scope machine
+                  $installed = $true
+                  Write-Host "✅ Telegram Desktop installed with WinGet"
+              }
+              catch {
+                  Write-Host "⚠️ WinGet install failed, falling back to official installer."
+                  Write-Host $_.Exception.Message
+              }
+          }
+          else {
+              Write-Host "⚠️ WinGet not available, using official installer fallback."
+          }
+
+          if (-not $installed) {
+              $tgUrl = "https://telegram.org/dl/desktop/win64"
+              $tgInstaller = "$env:TEMP\tsetup.exe"
+
+              Invoke-WebRequest -Uri $tgUrl -OutFile $tgInstaller
+
+              Write-Host "📲 Installing Telegram Desktop silently..."
+              Start-Process -FilePath $tgInstaller -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART" -Wait
+
+              Start-Sleep -Seconds 5
+
+              $installed =
+                (Test-Path "$env:ProgramFiles\Telegram Desktop\Telegram.exe") -or
+                (Test-Path "$env:LOCALAPPDATA\Programs\Telegram Desktop\Telegram.exe")
+
+              Remove-Item $tgInstaller -Force -ErrorAction SilentlyContinue
+          }
+
+          if (-not $installed) {
+              Write-Error "❌ Telegram Desktop installation failed"
+              exit 1
+          }
+
+          Write-Host "✅ Telegram Desktop installed"
+
+      - name: ☁️ Install Cloudflare WARP (1.1.1.1)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Write-Host "☁️ Downloading latest Cloudflare WARP..."
+
+          $warpUrl = "https://1111-releases.cloudflareclient.com/windows/Cloudflare_WARP_Release-x64.msi"
+          $warpInstaller = "$env:TEMP\warp.msi"
+
+          Invoke-WebRequest -Uri $warpUrl -OutFile $warpInstaller
+
+          Write-Host "☁️ Installing Cloudflare WARP silently..."
+          Start-Process msiexec.exe -ArgumentList "/i", "`"$warpInstaller`"", "/quiet", "/norestart" -Wait
+
+          Remove-Item $warpInstaller -Force
+
+          Write-Host "✅ Cloudflare WARP installed (left disconnected on purpose)"
+
+      - name: 🖱️ Install UltraVNC
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Write-Host "🖱️ Installing UltraVNC..."
+
+          if (-not (Get-Command choco -ErrorAction SilentlyContinue)) {
+              Write-Error "❌ Chocolatey is not available on this runner"
+              exit 1
+          }
+
+          choco install ultravnc -y --no-progress
+
+          $vncPath = "C:\Program Files\uvnc bvba\UltraVNC"
+          if (!(Test-Path $vncPath)) { $vncPath = "C:\Program Files\UltraVNC" }
+
+          if (!(Test-Path $vncPath)) {
+              Write-Error "❌ UltraVNC install folder not found"
+              exit 1
+          }
+
+          Write-Host "✅ UltraVNC installed at $vncPath"
+
+      - name: ⚙️ Configure UltraVNC
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $vncPath = "C:\Program Files\uvnc bvba\UltraVNC"
+          if (!(Test-Path $vncPath)) { $vncPath = "C:\Program Files\UltraVNC" }
+
+          $iniFile = Join-Path $vncPath "ultravnc.ini"
+          $url = "https://gitlab.com/MR.English2008/avica/-/raw/main/ultravnc.ini"
+
+          if (Test-Path $iniFile) { Remove-Item -Path $iniFile -Force }
+          Invoke-WebRequest -Uri $url -OutFile $iniFile
+
+          Write-Host "✅ UltraVNC config applied"
+
+      - name: 🚀 Start VNC Service
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $vncPath = "C:\Program Files\uvnc bvba\UltraVNC"
+          if (!(Test-Path "$vncPath\winvnc.exe")) { $vncPath = "C:\Program Files\UltraVNC" }
+
+          if (!(Test-Path "$vncPath\winvnc.exe")) {
+              Write-Error "❌ winvnc.exe not found"
+              exit 1
+          }
+
+          Push-Location $vncPath
+          ./winvnc.exe -install
+          Start-Sleep -Seconds 5
+
+          Stop-Service -Name "uvnc_service" -Force -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 2
+          Start-Service -Name "uvnc_service"
+          Pop-Location
+
+          Write-Host "✅ VNC Service is now running"
+
+      - name: 🔥 Firewall
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          if (!(Get-NetFirewallRule -DisplayName "UltraVNC_Automated" -ErrorAction SilentlyContinue)) {
+              New-NetFirewallRule -DisplayName "UltraVNC_Automated" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 5900
+          }
+
+          Write-Host "✅ Firewall rule added for port 5900"
+
+      - name: ⏳ Keep Alive & Display Connection Info
+        shell: pwsh
+        run: |
+          $minutesInput = "${{ github.event.inputs.session_minutes }}"
+          if ([string]::IsNullOrWhiteSpace($minutesInput)) { $minutesInput = "60" }
+          $minutes = [int]$minutesInput
+
+          if ($minutes -gt 335) {
+              Write-Host "⚠️ session_minutes capped at 335 (job timeout-minutes is 350; this leaves headroom for setup/teardown)"
+              $minutes = 335
+          }
+
+          $endTime = (Get-Date).AddMinutes($minutes)
+
+          Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          Write-Host "🟢 TEMPORARY VNC SESSION IS READY"
+          Write-Host "👤 Username      : $env:RDP_USERNAME"
+          Write-Host "🌐 Tailscale IP  : $env:TAILSCALE_IP"
+          Write-Host "🔐 Password      : (hidden – see repo secrets)"
+          Write-Host "⏱️  Duration      : $minutes minutes"
+          Write-Host "📲 Telegram Desktop installed"
+          Write-Host "☁️ Cloudflare WARP installed (off)"
+          Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+          while ((Get-Date) -lt $endTime) {
+              $remaining = [math]::Ceiling((New-TimeSpan -Start (Get-Date) -End $endTime).TotalMinutes)
+              Write-Host "[$(Get-Date -Format 'HH:mm:ss')] 🟢 Session alive... ($remaining min remaining)"
+              Start-Sleep -Seconds 300
+          }
+
+          Write-Host "⏹️ Session duration reached — job will now end and the runner will be destroyed."
