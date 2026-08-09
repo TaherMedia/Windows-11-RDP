@@ -89,19 +89,37 @@ jobs:
           $ErrorActionPreference = "Stop"
           Write-Host "📲 Installing Telegram Desktop..."
 
-          $tgUrl = "https://telegram.org/dl/desktop/win64"
-          $tgInstaller = Join-Path $env:TEMP "tsetup.exe"
+          $installed = $false
 
-          Invoke-WebRequest -Uri $tgUrl -OutFile $tgInstaller
-          Start-Process -FilePath $tgInstaller -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART") -Wait
+          if (Get-Command winget -ErrorAction SilentlyContinue) {
+              try {
+                  Write-Host "📲 Trying WinGet first..."
+                  winget source update | Out-Null
+                  winget install --id Telegram.TelegramDesktop -e --silent --accept-package-agreements --accept-source-agreements
+                  $installed = $true
+                  Write-Host "✅ Telegram Desktop installed with WinGet"
+              }
+              catch {
+                  Write-Host "⚠️ WinGet install failed, falling back to official installer."
+                  Write-Host $_.Exception.Message
+              }
+          }
 
-          Start-Sleep -Seconds 5
+          if (-not $installed) {
+              $tgUrl = "https://telegram.org/dl/desktop/win64"
+              $tgInstaller = Join-Path $env:TEMP "tsetup.exe"
 
-          $installed =
-              (Test-Path "$env:ProgramFiles\Telegram Desktop\Telegram.exe") -or
-              (Test-Path "$env:LOCALAPPDATA\Programs\Telegram Desktop\Telegram.exe")
+              Invoke-WebRequest -Uri $tgUrl -OutFile $tgInstaller
+              Start-Process -FilePath $tgInstaller -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART") -Wait
 
-          Remove-Item $tgInstaller -Force -ErrorAction SilentlyContinue
+              Start-Sleep -Seconds 5
+
+              $installed =
+                  (Test-Path "$env:ProgramFiles\Telegram Desktop\Telegram.exe") -or
+                  (Test-Path "$env:LOCALAPPDATA\Programs\Telegram Desktop\Telegram.exe")
+
+              Remove-Item $tgInstaller -Force -ErrorAction SilentlyContinue
+          }
 
           if (-not $installed) {
               throw "Telegram Desktop installation failed"
