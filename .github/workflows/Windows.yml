@@ -6,7 +6,7 @@ on:
       session_minutes:
         description: "How long to keep the session alive (minutes)"
         required: false
-        default: "60"
+        default: "360"
 
 jobs:
   secure-rdp:
