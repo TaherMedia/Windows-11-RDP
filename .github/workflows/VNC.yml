@@ -45,7 +45,7 @@ jobs:
           $installerPath = Join-Path $env:TEMP "tailscale.msi"
 
           Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
-          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+          Start-Process -FilePath msiexec.exe -ArgumentList @("/i", "`"$installerPath`"", "/quiet", "/norestart") -Wait
           Remove-Item $installerPath -Force -ErrorAction SilentlyContinue
 
           Write-Host "✅ Tailscale installed"
@@ -60,7 +60,7 @@ jobs:
               throw "tailscale.exe not found at $tailscaleExe"
           }
 
-          & $tailscaleExe up --authkey=$env:TAILSCALE_AUTHKEY --hostname="gh-runner-$($env:GITHUB_RUN_ID)"
+          & $tailscaleExe up --authkey=$env:TAILSCALE_AUTHKEY --hostname="gh-vnc-$($env:GITHUB_RUN_ID)"
 
           $tsIP = $null
           for ($i = 0; $i -lt 12; $i++) {
@@ -89,38 +89,19 @@ jobs:
           $ErrorActionPreference = "Stop"
           Write-Host "📲 Installing Telegram Desktop..."
 
-          $installed = $false
+          $tgUrl = "https://telegram.org/dl/desktop/win64"
+          $tgInstaller = Join-Path $env:TEMP "tsetup.exe"
 
-          if (Get-Command winget -ErrorAction SilentlyContinue) {
-              try {
-                  Write-Host "📲 Trying WinGet first..."
-                  winget source update | Out-Null
-                  winget install --id Telegram.TelegramDesktop -e --silent --accept-package-agreements --accept-source-agreements
-                  $installed = $true
-                  Write-Host "✅ Telegram Desktop installed with WinGet"
-              }
-              catch {
-                  Write-Host "⚠️ WinGet install failed, falling back to official installer."
-                  Write-Host $_.Exception.Message
-              }
-          }
+          Invoke-WebRequest -Uri $tgUrl -OutFile $tgInstaller
+          Start-Process -FilePath $tgInstaller -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART") -Wait
 
-          if (-not $installed) {
-              $tgUrl = "https://telegram.org/dl/desktop/win64"
-              $tgInstaller = Join-Path $env:TEMP "tsetup.exe"
+          Start-Sleep -Seconds 5
 
-              Invoke-WebRequest -Uri $tgUrl -OutFile $tgInstaller
-              Start-Process -FilePath $tgInstaller -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART" -Wait
+          $installed =
+              (Test-Path "$env:ProgramFiles\Telegram Desktop\Telegram.exe") -or
+              (Test-Path "$env:LOCALAPPDATA\Programs\Telegram Desktop\Telegram.exe")
 
-              Start-Sleep -Seconds 5
-
-              $installed =
-                  (Test-Path "$env:ProgramFiles\Telegram Desktop\Telegram.exe") -or
-                  (Test-Path "$env:LOCALAPPDATA\Programs\Telegram Desktop\Telegram.exe") -or
-                  (Get-Command Telegram -ErrorAction SilentlyContinue)
-
-              Remove-Item $tgInstaller -Force -ErrorAction SilentlyContinue
-          }
+          Remove-Item $tgInstaller -Force -ErrorAction SilentlyContinue
 
           if (-not $installed) {
               throw "Telegram Desktop installation failed"
@@ -137,7 +118,7 @@ jobs:
           $warpInstaller = Join-Path $env:TEMP "warp.msi"
 
           Invoke-WebRequest -Uri $warpUrl -OutFile $warpInstaller
-          Start-Process msiexec.exe -ArgumentList "/i", "`"$warpInstaller`"", "/quiet", "/norestart" -Wait
+          Start-Process -FilePath msiexec.exe -ArgumentList @("/i", "`"$warpInstaller`"", "/quiet", "/norestart") -Wait
           Remove-Item $warpInstaller -Force -ErrorAction SilentlyContinue
 
           Write-Host "✅ Cloudflare WARP installed (left disconnected on purpose)"
@@ -177,18 +158,17 @@ jobs:
               throw "UltraVNC install folder not found"
           }
 
-          $password = $env:VNC_PASSWORD
-          if ([string]::IsNullOrWhiteSpace($password)) {
+          if ([string]::IsNullOrWhiteSpace($env:VNC_PASSWORD)) {
               throw "VNC_PASSWORD secret is empty"
           }
 
+          $password = $env:VNC_PASSWORD
           if ($password.Length -gt 8) {
-              Write-Host "⚠️ UltraVNC classic auth only uses the first 8 characters. Trimming VNC_PASSWORD to 8 chars."
+              Write-Host "⚠️ UltraVNC classic auth uses only the first 8 characters. Trimming VNC_PASSWORD to 8 chars."
               $password = $password.Substring(0, 8)
           }
 
           $iniFile = Join-Path $vncPath "ultravnc.ini"
-          $portableFlag = Join-Path $vncPath "ultravnc.portable"
 
           @"
 [ultravnc]
@@ -201,8 +181,6 @@ UseRegistry=0
 ConnectPriority=0
 DisableTrayIcon=1
 "@ | Set-Content -Path $iniFile -Encoding ASCII
-
-          New-Item -Path $portableFlag -ItemType File -Force | Out-Null
 
           $zip = Join-Path $env:TEMP "createpassword.zip"
           $extract = Join-Path $env:TEMP "createpassword"
@@ -264,7 +242,7 @@ DisableTrayIcon=1
               & .\winvnc.exe -install
               Start-Sleep -Seconds 5
 
-              Stop-Service -Name "uvnc_service" -Force -ErrorAction SilentlyContinue
+              Stop-Service -Name "uvnc_service" -ErrorAction SilentlyContinue
               Start-Sleep -Seconds 2
               Start-Service -Name "uvnc_service"
           }
