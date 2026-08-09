@@ -11,54 +11,12 @@ on:
 jobs:
   setup-vnc:
     runs-on: windows-2025
-    timeout-minutes: 350
+    timeout-minutes: 359
 
     env:
-      RDP_USERNAME: ATOMA
-      RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
-      VNC_PASSWORD: ${{ secrets.RDP_PASSWORD }}
+      VNC_PASSWORD: ${{ secrets.VNC_PASSWORD }}
 
     steps:
-      - name: 🖥️ Enable Remote Desktop
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          Write-Host "🖥️ Enabling Remote Desktop Services..."
-
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
-            -Name 'fDenyTSConnections' -Value 0 -Force
-
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-            -Name 'UserAuthentication' -Value 0 -Force
-
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-            -Name 'SecurityLayer' -Value 0 -Force
-
-          netsh advfirewall firewall delete rule name="RDP-Tailscale" | Out-Null
-          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389 | Out-Null
-
-          Restart-Service -Name TermService -Force
-          Write-Host "✅ RDP service restarted & firewall rule added"
-
-      - name: 👤 Create Administrator User
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          Write-Host "👤 Setting up user: $env:RDP_USERNAME"
-
-          $securePass = ConvertTo-SecureString $env:RDP_PASSWORD -AsPlainText -Force
-
-          if (-not (Get-LocalUser -Name $env:RDP_USERNAME -ErrorAction SilentlyContinue)) {
-              New-LocalUser -Name $env:RDP_USERNAME -Password $securePass -AccountNeverExpires -PasswordNeverExpires
-              Write-Host "✅ User created successfully"
-          } else {
-              Write-Host "ℹ️ User already exists – reusing"
-          }
-
-          Add-LocalGroupMember -Group "Administrators" -Member $env:RDP_USERNAME -ErrorAction SilentlyContinue
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $env:RDP_USERNAME -ErrorAction SilentlyContinue
-          Write-Host "🔑 User granted Administrator & Remote Desktop rights"
-
       - name: 🌐 Install Tailscale VPN
         shell: pwsh
         run: |
@@ -85,7 +43,7 @@ jobs:
           $tsIP = $null
           $retries = 0
 
-          while (-not $tsIP -and $retries -lt 10) {
+          while (-not $tsIP -and $retries -lt 12) {
               $tsIP = (& "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4 | Select-Object -First 1).Trim()
               Start-Sleep -Seconds 5
               $retries++
@@ -99,20 +57,13 @@ jobs:
           "TAILSCALE_IP=$tsIP" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           Write-Host "📍 Tailscale IP: $tsIP"
 
-      - name: 🔍 Verify Tailscale Connectivity
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          Write-Host "🔍 Testing RDP port 3389 on $env:TAILSCALE_IP..."
-
-          $test = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
-
-          if (-not $test.TcpTestSucceeded) {
-              Write-Error "❌ RDP port is not reachable"
-              exit 1
-          }
-
-          Write-Host "✅ RDP port is open and reachable"
+          Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          Write-Host "🟢 VNC WILL BE AVAILABLE SOON"
+          Write-Host "🔌 VNC Port      : 5900"
+          Write-Host "🔗 VNC Link      : vnc://$tsIP:5900"
+          Write-Host "🧷 Import Target : $tsIP:5900"
+          Write-Host "🔐 Password      : use VNC_PASSWORD secret"
+          Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
       - name: 📲 Install Telegram Desktop
         shell: pwsh
@@ -144,8 +95,6 @@ jobs:
               $tgInstaller = "$env:TEMP\tsetup.exe"
 
               Invoke-WebRequest -Uri $tgUrl -OutFile $tgInstaller
-
-              Write-Host "📲 Installing Telegram Desktop silently..."
               Start-Process -FilePath $tgInstaller -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART" -Wait
 
               Start-Sleep -Seconds 5
@@ -165,7 +114,7 @@ jobs:
 
           Write-Host "✅ Telegram Desktop installed"
 
-      - name: ☁️ Install Cloudflare WARP (1.1.1.1)
+      - name: ☁️ Install Cloudflare WARP
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -175,10 +124,7 @@ jobs:
           $warpInstaller = "$env:TEMP\warp.msi"
 
           Invoke-WebRequest -Uri $warpUrl -OutFile $warpInstaller
-
-          Write-Host "☁️ Installing Cloudflare WARP silently..."
           Start-Process msiexec.exe -ArgumentList "/i", "`"$warpInstaller`"", "/quiet", "/norestart" -Wait
-
           Remove-Item $warpInstaller -Force -ErrorAction SilentlyContinue
 
           Write-Host "✅ Cloudflare WARP installed (left disconnected on purpose)"
@@ -206,25 +152,95 @@ jobs:
 
           Write-Host "✅ UltraVNC installed at $vncPath"
 
-      - name: ⚙️ Configure UltraVNC
+      - name: ⚙️ Configure UltraVNC Password
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
+
           $vncPath = "C:\Program Files\uvnc bvba\UltraVNC"
           if (!(Test-Path $vncPath)) { $vncPath = "C:\Program Files\UltraVNC" }
 
           if (!(Test-Path $vncPath)) {
-              Write-Error "❌ UltraVNC folder not found"
+              Write-Error "❌ UltraVNC install folder not found"
               exit 1
           }
 
+          if ([string]::IsNullOrWhiteSpace($env:VNC_PASSWORD)) {
+              Write-Error "❌ VNC_PASSWORD secret is empty"
+              exit 1
+          }
+
+          $vncPassword = $env:VNC_PASSWORD
+          if ($vncPassword.Length -gt 8) {
+              Write-Host "⚠️ UltraVNC classic auth only uses the first 8 characters. Trimming VNC_PASSWORD to 8 chars."
+              $vncPassword = $vncPassword.Substring(0, 8)
+          }
+
           $iniFile = Join-Path $vncPath "ultravnc.ini"
-          $url = "https://gitlab.com/MR.English2008/avica/-/raw/main/ultravnc.ini"
+          $portableFlag = Join-Path $vncPath "ultravnc.portable"
 
-          if (Test-Path $iniFile) { Remove-Item -Path $iniFile -Force }
-          Invoke-WebRequest -Uri $url -OutFile $iniFile
+          @"
+[ultravnc]
+passwd=
+passwd2=
+AuthRequired=1
+MSLogonRequired=0
+NewMSLogon=0
+UseRegistry=0
+ConnectPriority=0
+DisableTrayIcon=1
 
-          Write-Host "✅ UltraVNC config applied"
+[poll]
+TurboMode=1
+EnableDriver=0
+EnableHook=1
+"@ | Set-Content -Path $iniFile -Encoding ASCII
+
+          New-Item -Path $portableFlag -ItemType File -Force | Out-Null
+
+          $zip = Join-Path $env:TEMP "createpassword.zip"
+          $extract = Join-Path $env:TEMP "createpassword"
+          Remove-Item $extract -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path $extract | Out-Null
+
+          Invoke-WebRequest -Uri "https://uvnc.eu/download/133/createpassword.zip" -OutFile $zip
+          Expand-Archive -Path $zip -DestinationPath $extract -Force
+
+          $createExe = Get-ChildItem -Path $extract -Recurse -Filter "createpassword*.exe" |
+                       Where-Object { $_.Name -match 'x64' } |
+                       Select-Object -First 1
+
+          if (-not $createExe) {
+              $createExe = Get-ChildItem -Path $extract -Recurse -Filter "createpassword*.exe" |
+                           Select-Object -First 1
+          }
+
+          if (-not $createExe) {
+              Write-Error "❌ createpassword.exe not found after extraction"
+              exit 1
+          }
+
+          Copy-Item $createExe.FullName -Destination (Join-Path $vncPath $createExe.Name) -Force
+          $localCreate = Join-Path $vncPath $createExe.Name
+
+          Push-Location $vncPath
+          try {
+              & $localCreate -secure $vncPassword
+              if ($LASTEXITCODE -ne 0) {
+                  Write-Error "❌ createpassword failed with exit code $LASTEXITCODE"
+                  exit 1
+              }
+          }
+          finally {
+              Pop-Location
+          }
+
+          if (!(Test-Path $iniFile)) {
+              Write-Error "❌ ultravnc.ini was not created"
+              exit 1
+          }
+
+          Write-Host "✅ UltraVNC password configured from VNC_PASSWORD"
 
       - name: 🚀 Start VNC Service
         shell: pwsh
@@ -275,12 +291,11 @@ jobs:
 
           Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           Write-Host "🟢 TEMPORARY VNC SESSION IS READY"
-          Write-Host "👤 Username      : $env:RDP_USERNAME"
           Write-Host "🌐 Tailscale IP  : $env:TAILSCALE_IP"
           Write-Host "🔌 VNC Port      : 5900"
           Write-Host "🔗 VNC Link      : vnc://$($env:TAILSCALE_IP):5900"
-          Write-Host "🧷 VNC Import    : $($env:TAILSCALE_IP):5900"
-          Write-Host "🔐 Password      : (hidden – see repo secrets)"
+          Write-Host "🧷 Import Target : $($env:TAILSCALE_IP):5900"
+          Write-Host "🔐 Password      : use VNC_PASSWORD secret"
           Write-Host "⏱️  Duration      : $minutes minutes"
           Write-Host "📲 Telegram Desktop installed"
           Write-Host "☁️ Cloudflare WARP installed (off)"
