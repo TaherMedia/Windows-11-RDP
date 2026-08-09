@@ -11,7 +11,7 @@ on:
 jobs:
   setup-vnc:
     runs-on: windows-2025
-    timeout-minutes: 359
+    timeout-minutes: 350
 
     env:
       VNC_PASSWORD: ${{ secrets.VNC_PASSWORD }}
