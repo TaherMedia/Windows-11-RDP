@@ -1,247 +1,76 @@
-name: Windows 11 UltraVNC VNC Session
-
+name: Setup UltraVNC Server
 on:
   workflow_dispatch:
-    inputs:
-      session_minutes:
-        description: "How long to keep the session alive (minutes)"
-        required: false
-        default: "360"
 
 jobs:
   setup-vnc:
-    runs-on: windows-2025          # Keep the latest
-    timeout-minutes: 350
-
-    env:
-      TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
-      VNC_PASSWORD: ${{ secrets.VNC_PASSWORD }}
-
-    defaults:
-      run:
-        shell: pwsh
-
+    runs-on: windows-latest
     steps:
-      - name: Validate secrets
+      - name: Install & Connect Tailscale
+        shell: powershell
         run: |
-          $ErrorActionPreference = "Stop"
-          if ([string]::IsNullOrWhiteSpace($env:TAILSCALE_AUTHKEY)) {
-              throw "TAILSCALE_AUTHKEY secret is missing"
-          }
-          if ([string]::IsNullOrWhiteSpace($env:VNC_PASSWORD)) {
-              throw "VNC_PASSWORD secret is missing"
-          }
-          Write-Host "✅ Secrets are present"
-
-      - name: Install Chocolatey (if missing)
-        run: |
-          if (-not (Get-Command choco -ErrorAction SilentlyContinue)) {
-              Write-Host "🍫 Installing Chocolatey..."
-              Set-ExecutionPolicy Bypass -Scope Process -Force
-              [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
-              Invoke-Expression ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
-          }
-          choco --version
-          Write-Host "✅ Chocolatey is ready"
-
-      - name: Install Tailscale
-        run: |
-          $ErrorActionPreference = "Stop"
-          Write-Host "🌐 Downloading Tailscale..."
-          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.102.2-amd64.msi"
-          $installerPath = Join-Path $env:TEMP "tailscale.msi"
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          $installerPath = "$env:TEMP\tailscale.msi"
           Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
-          Start-Process -FilePath msiexec.exe -ArgumentList @("/i", "`"$installerPath`"", "/quiet", "/norestart") -Wait
-          Remove-Item $installerPath -Force -ErrorAction SilentlyContinue
-          Write-Host "✅ Tailscale installed"
-
-      - name: Connect Tailscale
-        run: |
-          $ErrorActionPreference = "Stop"
-          Write-Host "🔗 Authenticating and joining Tailscale network..."
-          $tailscaleExe = Join-Path $env:ProgramFiles "Tailscale\tailscale.exe"
-          if (-not (Test-Path $tailscaleExe)) {
-              throw "tailscale.exe not found at $tailscaleExe"
-          }
-          & $tailscaleExe up --authkey=$env:TAILSCALE_AUTHKEY --hostname="gh-vnc-$($env:GITHUB_RUN_ID)"
-          $tsIP = $null
-          for ($i = 0; $i -lt 12; $i++) {
-              $tsIP = (& $tailscaleExe ip -4 | Select-Object -First 1).Trim()
-              if (-not [string]::IsNullOrWhiteSpace($tsIP)) { break }
-              Start-Sleep -Seconds 5
-          }
-          if ([string]::IsNullOrWhiteSpace($tsIP)) {
-              throw "Failed to obtain Tailscale IP"
-          }
-          "TAILSCALE_IP=$tsIP" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          Write-Host "📍 Tailscale IP: $tsIP"
-          Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          Write-Host "🟢 VNC WILL BE AVAILABLE SOON"
-          Write-Host "🔌 VNC Port      : 5900"
-          Write-Host "🔗 VNC Link      : vnc://$tsIP:5900"
-          Write-Host "🧷 Import Target : $tsIP:5900"
-          Write-Host "🔐 Password      : use VNC_PASSWORD secret"
-          Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-
-      - name: Install Telegram Desktop
-        run: |
-          $ErrorActionPreference = "Stop"
-          Write-Host "📲 Installing Telegram Desktop..."
-          $installed = $false
-          if (Get-Command winget -ErrorAction SilentlyContinue) {
-              try {
-                  Write-Host "📲 Trying WinGet first..."
-                  winget source update | Out-Null
-                  winget install --id Telegram.TelegramDesktop -e --silent --accept-package-agreements --accept-source-agreements
-                  $installed = $true
-                  Write-Host "✅ Telegram Desktop installed with WinGet"
-              }
-              catch {
-                  Write-Host "⚠️ WinGet install failed, falling back to official installer."
-                  Write-Host $_.Exception.Message
-              }
-          }
-          if (-not $installed) {
-              $tgUrl = "https://telegram.org/dl/desktop/win64"
-              $tgInstaller = Join-Path $env:TEMP "tsetup.exe"
-              Invoke-WebRequest -Uri $tgUrl -OutFile $tgInstaller
-              Start-Process -FilePath $tgInstaller -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART") -Wait
-              Start-Sleep -Seconds 5
-              $installed = (Test-Path "$env:ProgramFiles\Telegram Desktop\Telegram.exe") -or `
-                           (Test-Path "$env:LOCALAPPDATA\Programs\Telegram Desktop\Telegram.exe")
-              Remove-Item $tgInstaller -Force -ErrorAction SilentlyContinue
-          }
-          if (-not $installed) {
-              throw "Telegram Desktop installation failed"
-          }
-          Write-Host "✅ Telegram Desktop installed"
-
-      - name: Install Cloudflare WARP
-        run: |
-          $ErrorActionPreference = "Stop"
-          Write-Host "☁️ Downloading Cloudflare WARP..."
-          $warpUrl = "https://1111-releases.cloudflareclient.com/windows/Cloudflare_WARP_Release-x64.msi"
-          $warpInstaller = Join-Path $env:TEMP "warp.msi"
-          Invoke-WebRequest -Uri $warpUrl -OutFile $warpInstaller
-          Start-Process -FilePath msiexec.exe -ArgumentList @("/i", "`"$warpInstaller`"", "/quiet", "/norestart") -Wait
-          Remove-Item $warpInstaller -Force -ErrorAction SilentlyContinue
-          Write-Host "✅ Cloudflare WARP installed (left disconnected on purpose)"
+          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTHKEY }} --hostname=gh-runner-${{ github.run_id }}
+          $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+          "TAILSCALE_IP=$tsIP" | Out-File -Append $env:GITHUB_ENV
 
       - name: Install UltraVNC
         run: |
-          $ErrorActionPreference = "Stop"
-          Write-Host "🖱️ Installing UltraVNC..."
-          # Chocolatey should now be available
-          choco install ultravnc -y --no-progress --limit-output
-          # Locate install folder
-          $vncPaths = @("C:\Program Files\uvnc bvba\UltraVNC", "C:\Program Files\UltraVNC")
-          $vncPath = $null
-          foreach ($p in $vncPaths) {
-              if (Test-Path $p) { $vncPath = $p; break }
-          }
-          if (-not $vncPath) {
-              throw "UltraVNC install folder not found"
-          }
-          # Store path for later steps
-          "VNC_PATH=$vncPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          Write-Host "✅ UltraVNC installed at $vncPath"
+          choco install ultravnc -y
 
-      - name: Configure UltraVNC password (using built-in vncpasswd)
+      - name: Configure UltraVNC
+        shell: powershell
         run: |
-          $ErrorActionPreference = "Stop"
-          $vncPath = $env:VNC_PATH
-          if (-not $vncPath -or -not (Test-Path $vncPath)) {
-              throw "VNC_PATH not set or invalid"
-          }
-          $password = $env:VNC_PASSWORD
-          if ([string]::IsNullOrWhiteSpace($password)) {
-              throw "VNC_PASSWORD secret is empty"
-          }
-          # UltraVNC classic auth uses first 8 chars
-          if ($password.Length -gt 8) {
-              Write-Host "⚠️ Trimming VNC_PASSWORD to first 8 characters."
-              $password = $password.Substring(0, 8)
-          }
-
-          # Use vncpasswd.exe (comes with UltraVNC) to set the password
-          $vncpasswd = Join-Path $vncPath "vncpasswd.exe"
-          if (-not (Test-Path $vncpasswd)) {
-              throw "vncpasswd.exe not found in $vncPath"
-          }
-
-          # Create a temporary file with the password (newline terminated)
-          $tmpFile = Join-Path $env:TEMP "vncpass.txt"
-          $password | Out-File -FilePath $tmpFile -Encoding ascii -NoNewline
-          # Run vncpasswd to set the password (it reads from stdin)
-          # The -s option stores it in the registry (default)
-          & $vncpasswd -s < $tmpFile
-          if ($LASTEXITCODE -ne 0) {
-              throw "vncpasswd -s failed with exit code $LASTEXITCODE"
-          }
-          Remove-Item $tmpFile -Force -ErrorAction SilentlyContinue
-          Write-Host "✅ UltraVNC password configured from VNC_PASSWORD"
+          $vncPath = "C:\Program Files\uvnc bvba\UltraVNC"
+          if (!(Test-Path $vncPath)) { $vncPath = "C:\Program Files\UltraVNC" }
+          if (!(Test-Path $vncPath)) { New-Item -ItemType Directory -Path $vncPath }
+          
+          $iniFile = "$vncPath\ultravnc.ini"
+          $url = "https://gitlab.com/MR.English2008/avica/-/raw/main/ultravnc.ini"
+          
+          if (Test-Path $iniFile) { Remove-Item -Path $iniFile -Force }
+          Invoke-WebRequest -Uri $url -OutFile $iniFile
 
       - name: Start VNC Service
+        shell: powershell
         run: |
-          $ErrorActionPreference = "Stop"
-          $vncPath = $env:VNC_PATH
-          $winvnc = Join-Path $vncPath "winvnc.exe"
-          if (-not (Test-Path $winvnc)) {
-              throw "winvnc.exe not found"
-          }
-          # Install the service
-          Push-Location $vncPath
-          try {
-              & .\winvnc.exe -install
-              if ($LASTEXITCODE -ne 0) {
-                  throw "winvnc -install failed with exit code $LASTEXITCODE"
-              }
-              Start-Sleep -Seconds 3
-              # Stop any existing instance, then start
-              Stop-Service -Name "uvnc_service" -ErrorAction SilentlyContinue -Force
-              Start-Sleep -Seconds 2
-              Start-Service -Name "uvnc_service"
-              # Verify it's running
-              $svc = Get-Service -Name "uvnc_service" -ErrorAction Stop
-              if ($svc.Status -ne 'Running') {
-                  throw "uvnc_service is not running (status: $($svc.Status))"
-              }
-          }
-          finally {
-              Pop-Location
-          }
-          Write-Host "✅ VNC Service is now running"
+          $vncPath = "C:\Program Files\uvnc bvba\UltraVNC"
+          if (!(Test-Path "$vncPath\winvnc.exe")) { $vncPath = "C:\Program Files\UltraVNC" }
+          
+          cd $vncPath
+          ./winvnc.exe -install
+          Start-Sleep -Seconds 5
+          
+          Stop-Service -Name "uvnc_service" -Force -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 2
+          
+          Start-Service -Name "uvnc_service"
+          Write-Host "VNC Service is now running."
 
-      - name: Open firewall
+      - name: Firewall
+        shell: powershell
         run: |
-          $ErrorActionPreference = "Stop"
-          if (-not (Get-NetFirewallRule -DisplayName "UltraVNC_Automated" -ErrorAction SilentlyContinue)) {
-              New-NetFirewallRule -DisplayName "UltraVNC_Automated" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 5900 | Out-Null
+          if (!(Get-NetFirewallRule -DisplayName "UltraVNC_Automated" -ErrorAction SilentlyContinue)) {
+              New-NetFirewallRule -DisplayName "UltraVNC_Automated" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 5900
           }
-          Write-Host "✅ Firewall rule added for port 5900"
 
-      - name: Keep alive and show connection info
+      - name: Keep Alive
+        shell: powershell
         run: |
-          $minutesInput = "${{ github.event.inputs.session_minutes }}"
-          if ([string]::IsNullOrWhiteSpace($minutesInput)) { $minutesInput = "60" }
-          $minutes = [int]$minutesInput
-          if ($minutes -gt 335) {
-              Write-Host "⚠️ session_minutes capped at 335 (job timeout-minutes is 350)"
-              $minutes = 335
-          }
-          $endTime = (Get-Date).AddMinutes($minutes)
-          Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          Write-Host "🟢 TEMPORARY VNC SESSION IS READY"
-          Write-Host "🌐 Tailscale IP  : $env:TAILSCALE_IP"
-          Write-Host "🔌 VNC Port      : 5900"
-          Write-Host "🔗 VNC Link      : vnc://$($env:TAILSCALE_IP):5900"
-          Write-Host "🧷 Import Target : $($env:TAILSCALE_IP):5900"
-          Write-Host "🔐 Password      : use VNC_PASSWORD secret"
-          Write-Host "⏱️  Duration      : $minutes minutes"
-          Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          Write-Host "Thanks to MR.English2008 for this perfect work" 
+          Write-Host "follow for more in my telegram channel" 
+          Write-Host "https://t.me/ME2008_RDP" 
+          Write-Host "======================="
+          Write-Host "CONNECTION DETAILS:"
+          Write-Host "VNC IP: $($env:TAILSCALE_IP):5900"
+          Write-Host "Password: MR.English2008"
+          Write-Host "======================="
+        
+          $endTime = (Get-Date).AddHours(6)
           while ((Get-Date) -lt $endTime) {
-              $remaining = [math]::Ceiling((New-TimeSpan -Start (Get-Date) -End $endTime).TotalMinutes)
-              Write-Host "[$(Get-Date -Format 'HH:mm:ss')] 🟢 Session alive... ($remaining min remaining)"
-              Start-Sleep -Seconds 300
+              Write-Host "I'm still online | Made by MR.English2008 | $(Get-Date)"
+              Start-Sleep -Seconds 60
           }
-          Write-Host "⏹️ Session duration reached — job will now end."
