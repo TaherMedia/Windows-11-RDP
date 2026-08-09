@@ -1,4 +1,4 @@
-name: 🪟 Windows 11 UltraVNC TEMP
+name: Windows 11 UltraVNC VNC Session
 
 on:
   workflow_dispatch:
@@ -15,6 +15,7 @@ jobs:
 
     env:
       VNC_PASSWORD: ${{ secrets.VNC_PASSWORD }}
+      TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
 
     steps:
       - name: 🌐 Install Tailscale VPN
@@ -38,7 +39,7 @@ jobs:
           $ErrorActionPreference = "Stop"
           Write-Host "🔗 Authenticating & joining Tailscale network..."
 
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTHKEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=$env:TAILSCALE_AUTHKEY --hostname=gh-runner-$env:GITHUB_RUN_ID
 
           $tsIP = $null
           $retries = 0
@@ -49,7 +50,7 @@ jobs:
               $retries++
           }
 
-          if (-not $tsIP) {
+          if ([string]::IsNullOrWhiteSpace($tsIP)) {
               Write-Error "❌ Failed to obtain Tailscale IP"
               exit 1
           }
@@ -172,7 +173,7 @@ jobs:
 
           $vncPassword = $env:VNC_PASSWORD
           if ($vncPassword.Length -gt 8) {
-              Write-Host "⚠️ UltraVNC classic auth only uses the first 8 characters. Trimming VNC_PASSWORD to 8 chars."
+              Write-Host "⚠️ UltraVNC classic auth uses only the first 8 characters. Trimming VNC_PASSWORD to 8 chars."
               $vncPassword = $vncPassword.Substring(0, 8)
           }
 
