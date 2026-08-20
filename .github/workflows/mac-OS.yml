@@ -1,0 +1,162 @@
+name: VM Setup Workflow
+
+on:
+  workflow_dispatch:
+    inputs:
+      connection_method:
+        description: "Choose connection method (tailscale/ngrok/bore)"
+        required: true
+        default: "tailscale"
+      runtime:
+        description: "Session runtime in minutes"
+        required: true
+        default: "360"
+      
+jobs:
+  setup-vm:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Connection (Tailscale or Ngrok or Bore)
+        run: |
+          METHOD="${{ github.event.inputs.connection_method }}"
+          if [ "$METHOD" = "tailscale" ]; then
+            curl -fsSL https://tailscale.com/install.sh | sudo sh > /dev/null 2>&1
+            sudo tailscale up --authkey "${TAILSCALE_AUTHKEY}" --hostname "mac-vm-${{ github.run_id }}" --accept-routes --accept-dns=false
+            TS_IP=$(sudo tailscale ip -4 | head -n1)
+            echo "CONNECTION_IP=$TS_IP" >> $GITHUB_ENV
+            echo "CONNECTION_TYPE=Tailscale" >> $GITHUB_ENV
+          elif [ "$METHOD" = "ngrok" ]; then
+            wget -q -O ngrok.zip https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.zip > /dev/null 2>&1
+            unzip -q ngrok.zip > /dev/null 2>&1
+            sudo mv ngrok /usr/local/bin/ > /dev/null 2>&1
+            ngrok config add-authtoken "${NGROK_AUTH}"
+            echo "CONNECTION_TYPE=Ngrok" >> $GITHUB_ENV
+          elif [ "$METHOD" = "bore" ]; then 
+            cargo install bore-cli > /dev/null 2>&1
+            echo "$HOME/.cargo/bin" >> $GITHUB_PATH 
+            echo "CONNECTION_TYPE=Bore" >> $GITHUB_ENV
+          else
+            exit 1
+          fi
+
+      - name: Install QEMU and components
+        run: |
+          sudo apt-get update -qq > /dev/null 2>&1
+          sudo apt-get install -y -qq qemu-system-x86 ovmf novnc websockify wget curl unzip p7zip-full unrar-free tar python3-pip jq > /dev/null 2>&1
+          pip install internetarchive > /dev/null 2>&1
+          git clone https://github.com/stck-lzm/badown ~/badown > /dev/null 2>&1
+          chmod +x ~/badown/badown > /dev/null 2>&1
+          sudo touch ~/badown/.badown.tmp > /dev/null 2>&1
+
+      - name: Download macOS-Simple-KVM archive
+        env:
+          SRC: "https://www.mediafire.com/file/insfa1o9yt48jp4/macOS-Simple-KVM.7z"
+          FILE_PATH: "/mnt/macOS-Simple-KVM.7z"
+        run: |
+          echo "Using badown to download from: $SRC"
+          cd ~/badown
+          CACHE_FILE="/tmp/badown_cache.log"
+          : > "$CACHE_FILE"
+          (
+            sudo ./badown "$SRC" >"$CACHE_FILE" 2>&1 &
+            pid=$!
+            last_update=$(date +%s)
+            progress=""
+            while kill -0 $pid 2>/dev/null; do
+              now=$(date +%s)
+              if (( now - last_update >= 10 )); then
+                new_progress=$(grep -Eo '[0-9]{1,3}%' "$CACHE_FILE" | tail -n1)
+                if [[ -n "$new_progress" ]]; then
+                  progress="$new_progress"
+                  echo "Downloading... $progress"
+                else
+                  echo "Downloading..."
+                fi
+                last_update=$now
+              fi
+              sleep 0.2
+            done
+            wait $pid
+          )
+          DOWNLOADED=$(ls -t | head -n1)
+          sudo mv "$DOWNLOADED" "$FILE_PATH"
+            
+      - name: Extract macOS-Simple-KVM archive
+        run: |
+          cd /mnt
+          sudo 7z x macOS-Simple-KVM.7z -o/mnt -y
+          sudo rm -f /mnt/macOS-Simple-KVM.7z
+          sudo rm -f /mnt/macOS-Simple-KVM/basic.sh
+          sudo wget -q -O /mnt/macOS-Simple-KVM/basic.sh https://gitlab.com/MR.English2008/Mega_Gen/-/raw/main/basic.sh
+          sudo chmod +x /mnt/macOS-Simple-KVM/basic.sh
+
+      - name: Run basic.sh in background
+        run: |
+          cd /mnt/macOS-Simple-KVM
+          sudo chmod +x basic.sh
+          nohup sudo ./basic.sh >/dev/null 2>&1 &
+
+      - name: Expose VNC Port (5900) with Tunnel
+        if: ${{ github.event.inputs.connection_method == 'ngrok' || github.event.inputs.connection_method == 'bore' }}
+        run: |
+          METHOD="${{ github.event.inputs.connection_method }}"
+          PORT=5900
+          PROTOCOL="VNC"
+
+          if [ "$METHOD" = "ngrok" ]; then
+            nohup ngrok tcp $PORT --region=eu > ngrok_log.log 2>&1 &
+            sleep 10
+            curl --silent http://127.0.0.1:4040/api/tunnels > tunnels.json
+            TUNNEL_URL=$(jq -r ".tunnels[] | select(.config.addr==\"localhost:$PORT\") | .public_url" tunnels.json)
+            if [ -z "$TUNNEL_URL" ]; then
+                echo "::error::Failed to get Ngrok public address."
+                exit 1
+            fi
+            echo "${PROTOCOL}_URL=$TUNNEL_URL" >> $GITHUB_ENV
+            echo "CONNECTION_IP=$TUNNEL_URL" >> $GITHUB_ENV
+            echo "$PROTOCOL (Ngrok): $TUNNEL_URL"
+
+          elif [ "$METHOD" = "bore" ]; then
+            nohup bore local $PORT --to bore.pub > bore_log.log 2>&1 &
+            sleep 5
+            TUNNEL_INFO=$(grep "listening at bore.pub" bore_log.log | tail -n 1)
+            TUNNEL_IP=$(echo "$TUNNEL_INFO" | grep -Eo 'bore.pub:[0-9]+')
+            if [ -z "$TUNNEL_IP" ]; then
+                echo "::error::Failed to get Bore public address."
+                sudo pkill -f 'bore local' || true 
+                exit 1
+            fi
+            echo "${PROTOCOL}_URL=$TUNNEL_IP" >> $GITHUB_ENV
+            echo "CONNECTION_IP=$TUNNEL_IP" >> $GITHUB_ENV
+            echo "$PROTOCOL (Bore): $TUNNEL_IP"
+          fi
+
+      - name: Display VNC Connection Info and Keep Session Alive
+        run: |
+          echo "=== VNC CONNECTION INFORMATION ==="
+          echo "User: ${USERNAME}"
+          echo "Password: ${PASSWORD}"
+          echo
+          CONNECTION_TYPE="${{ env.CONNECTION_TYPE }}"
+          CONNECTION_IP="${{ env.CONNECTION_IP }}"
+          echo "Connection Method: $CONNECTION_TYPE"
+          echo "Selected Program: VNC (Port 5900)"
+          echo
+          if [ "$CONNECTION_TYPE" = "Tailscale" ]; then
+            echo "Tailscale IP:"
+            sudo tailscale ip -4 || true
+            echo
+            echo ">>> VNC Connection: $CONNECTION_IP:5900"
+          elif [ "$CONNECTION_TYPE" = "Ngrok" ] || [ "$CONNECTION_TYPE" = "Bore" ]; then
+            echo ">>> VNC ($CONNECTION_TYPE): $CONNECTION_IP"
+          else
+            echo "Connection failed or tunnel method not specified."
+          fi
+          echo
+          RUNTIME="${{ github.event.inputs.runtime }}"
+          sleep $((RUNTIME * 60))
+          echo "Session ended after $RUNTIME minutes."
