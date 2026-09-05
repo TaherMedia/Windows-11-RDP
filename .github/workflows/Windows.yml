@@ -11,7 +11,7 @@ on:
 jobs:
   secure-rdp:
     runs-on: windows-2025
-    timeout-minutes: 350
+    timeout-minutes: 360
 
     env:
       RDP_USERNAME: ATOMA
@@ -164,7 +164,7 @@ jobs:
           if ([string]::IsNullOrWhiteSpace($minutesInput)) { $minutesInput = "60" }
           $minutes = [int]$minutesInput
 
-          if ($minutes -gt 335) {
+          if ($minutes -gt 360) {
               Write-Host "⚠️ session_minutes capped at 335 (job timeout-minutes is 350; this leaves headroom for setup/teardown)"
               $minutes = 335
           }
