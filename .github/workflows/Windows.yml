@@ -16,14 +16,12 @@ jobs:
     env:
       RDP_USERNAME: ATOMA
       RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
-
-      # Current Tailscale stable version
       TAILSCALE_VERSION: "1.102.4"
 
     steps:
 
       # ============================================================
-      # RDP
+      # ENABLE RDP
       # ============================================================
 
       - name: 🖥️ Enable Remote Desktop
@@ -42,13 +40,13 @@ jobs:
           Set-ItemProperty `
             -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
             -Name 'UserAuthentication' `
-            -Value 0 `
+            -Value 1 `
             -Force
 
           Set-ItemProperty `
             -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
             -Name 'SecurityLayer' `
-            -Value 0 `
+            -Value 1 `
             -Force
 
           Write-Host "🔥 Configuring Windows Firewall..."
@@ -66,9 +64,10 @@ jobs:
 
           Write-Host "✅ RDP service restarted"
           Write-Host "✅ Firewall rule added"
+          Write-Host "✅ Network Level Authentication enabled"
 
       # ============================================================
-      # USER
+      # CREATE RDP USER
       # ============================================================
 
       - name: 👤 Create Administrator User
@@ -79,8 +78,7 @@ jobs:
           Write-Host "👤 Setting up user: $env:RDP_USERNAME"
 
           if ([string]::IsNullOrWhiteSpace($env:RDP_PASSWORD)) {
-              Write-Error "❌ RDP_PASSWORD secret is empty or missing"
-              exit 1
+              throw "❌ RDP_PASSWORD secret is empty or missing."
           }
 
           $securePass = ConvertTo-SecureString `
@@ -106,10 +104,7 @@ jobs:
           }
           else {
 
-              Write-Host "ℹ️ User already exists – reusing"
-
-              # Keep the password synchronized with the GitHub Secret.
-              $localUser = Get-LocalUser -Name $env:RDP_USERNAME
+              Write-Host "ℹ️ User already exists"
 
               Set-LocalUser `
                 -Name $env:RDP_USERNAME `
@@ -118,13 +113,11 @@ jobs:
               Write-Host "✅ Existing user password updated"
           }
 
-          # Administrator membership
           Add-LocalGroupMember `
             -Group "Administrators" `
             -Member $env:RDP_USERNAME `
             -ErrorAction SilentlyContinue
 
-          # Remote Desktop membership
           Add-LocalGroupMember `
             -Group "Remote Desktop Users" `
             -Member $env:RDP_USERNAME `
@@ -137,198 +130,270 @@ jobs:
             Select-Object Name, Enabled, Description
 
       # ============================================================
-      # DARK MODE
+      # WINDOWS DARK MODE
+      #
+      # No NTUSER.DAT loading.
+      # No HKU hive mounting.
+      # No reg unload.
+      #
+      # A one-time task runs in ATOMA's user context at logon,
+      # so HKCU is naturally ATOMA's profile.
       # ============================================================
 
-      - name: 🌙 Configure Windows Dark Mode
+      - name: 🌙 Configure Windows Dark Mode for ATOMA
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
 
-          Write-Host "🌙 Configuring Windows Dark Mode for $env:RDP_USERNAME..."
+          Import-Module ScheduledTasks -ErrorAction Stop
 
-          $profileRoot = "C:\Users\$env:RDP_USERNAME"
-          $userHiveFile = Join-Path $profileRoot "NTUSER.DAT"
-          $defaultHiveFile = "C:\Users\Default\NTUSER.DAT"
+          $taskName = "ATOMA-Initialize-DarkMode"
+          $scriptDir = "C:\ProgramData\ATOMA"
+          $scriptPath = Join-Path $scriptDir "Set-DarkMode.ps1"
 
-          $tempHiveName = "ATOMA_THEME_TEMP"
-
-          Write-Host "📂 Checking user profile..."
+          Write-Host "🌙 Preparing Dark Mode for $env:RDP_USERNAME..."
 
           # ----------------------------------------------------------
-          # Helper function
+          # Create directory
           # ----------------------------------------------------------
 
-          function Set-DarkModeInHive {
-              param (
-                  [Parameter(Mandatory = $true)]
-                  [string]$HiveName
-              )
+          New-Item `
+            -Path $scriptDir `
+            -ItemType Directory `
+            -Force | Out-Null
 
-              $personalizePath =
-                  "Registry::HKEY_USERS\$HiveName\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
+          # ----------------------------------------------------------
+          # Remove any previous copy of the task
+          # ----------------------------------------------------------
 
-              Write-Host "🌓 Configuring Personalize registry key..."
+          $oldTask = Get-ScheduledTask `
+            -TaskName $taskName `
+            -ErrorAction SilentlyContinue
 
-              New-Item `
-                  -Path $personalizePath `
-                  -Force | Out-Null
+          if ($oldTask) {
+              Write-Host "🧹 Removing previous Dark Mode task..."
 
-              # 0 = Dark
-              # 1 = Light
-
-              New-ItemProperty `
-                  -Path $personalizePath `
-                  -Name "AppsUseLightTheme" `
-                  -PropertyType DWord `
-                  -Value 0 `
-                  -Force | Out-Null
-
-              New-ItemProperty `
-                  -Path $personalizePath `
-                  -Name "SystemUsesLightTheme" `
-                  -PropertyType DWord `
-                  -Value 0 `
-                  -Force | Out-Null
-
-              # Windows transparency
-              New-ItemProperty `
-                  -Path $personalizePath `
-                  -Name "EnableTransparency" `
-                  -PropertyType DWord `
-                  -Value 1 `
-                  -Force | Out-Null
-
-              $appsMode =
-                  (Get-ItemProperty `
-                      -Path $personalizePath `
-                      -Name "AppsUseLightTheme").AppsUseLightTheme
-
-              $systemMode =
-                  (Get-ItemProperty `
-                      -Path $personalizePath `
-                      -Name "SystemUsesLightTheme").SystemUsesLightTheme
-
-              Write-Host "   AppsUseLightTheme    = $appsMode"
-              Write-Host "   SystemUsesLightTheme = $systemMode"
-
-              if ($appsMode -ne 0 -or $systemMode -ne 0) {
-                  throw "Dark Mode verification failed."
-              }
-
-              Write-Host "✅ Dark Mode verified"
+              Unregister-ScheduledTask `
+                -TaskName $taskName `
+                -Confirm:$false
           }
 
           # ----------------------------------------------------------
-          # Make sure our temporary hive isn't already loaded
+          # Script executed when ATOMA logs in
           # ----------------------------------------------------------
 
-          & reg.exe unload "HKU\$tempHiveName" 2>$null | Out-Null
+          $darkModeScript = @'
+$ErrorActionPreference = "Stop"
+
+Write-Host "🌙 Applying Windows Dark Mode..."
+Write-Host "👤 Current user: $env:USERNAME"
+
+$personalizeKey =
+    "HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
+
+# Create Personalize key
+& reg.exe add "$personalizeKey" /f | Out-Null
+
+if ($LASTEXITCODE -ne 0) {
+    throw "Failed to create Personalize registry key."
+}
+
+# Dark application mode
+& reg.exe add "$personalizeKey" `
+    /v AppsUseLightTheme `
+    /t REG_DWORD `
+    /d 0 `
+    /f | Out-Null
+
+if ($LASTEXITCODE -ne 0) {
+    throw "Failed to set AppsUseLightTheme."
+}
+
+# Dark Windows/system mode
+& reg.exe add "$personalizeKey" `
+    /v SystemUsesLightTheme `
+    /t REG_DWORD `
+    /d 0 `
+    /f | Out-Null
+
+if ($LASTEXITCODE -ne 0) {
+    throw "Failed to set SystemUsesLightTheme."
+}
+
+# Transparency
+& reg.exe add "$personalizeKey" `
+    /v EnableTransparency `
+    /t REG_DWORD `
+    /d 1 `
+    /f | Out-Null
+
+# ----------------------------------------------------------
+# Verify
+# ----------------------------------------------------------
+
+Write-Host "🔎 Verifying Dark Mode..."
+
+$query = & reg.exe query "$personalizeKey" 2>&1
+
+Write-Host ""
+Write-Host $query
+Write-Host ""
+
+if ($query -notmatch 'AppsUseLightTheme\s+REG_DWORD\s+0x0') {
+    throw "AppsUseLightTheme was not set to 0."
+}
+
+if ($query -notmatch 'SystemUsesLightTheme\s+REG_DWORD\s+0x0') {
+    throw "SystemUsesLightTheme was not set to 0."
+}
+
+Write-Host "✅ AppsUseLightTheme = 0"
+Write-Host "✅ SystemUsesLightTheme = 0"
+Write-Host "✅ Dark Mode applied successfully"
+
+# ----------------------------------------------------------
+# Refresh Explorer in the user's session
+# ----------------------------------------------------------
+
+try {
+    $explorerProcesses = Get-Process explorer -ErrorAction SilentlyContinue
+
+    if ($explorerProcesses) {
+        $explorerProcesses |
+            Stop-Process -Force -ErrorAction SilentlyContinue
+
+        Start-Sleep -Seconds 2
+    }
+
+    Start-Process explorer.exe
+}
+catch {
+    Write-Host "ℹ️ Explorer refresh was skipped."
+}
+
+# ----------------------------------------------------------
+# Remove one-time task
+# ----------------------------------------------------------
+
+try {
+    Unregister-ScheduledTask `
+        -TaskName "ATOMA-Initialize-DarkMode" `
+        -Confirm:$false `
+        -ErrorAction SilentlyContinue
+
+    Write-Host "🧹 One-time Dark Mode task removed"
+}
+catch {
+    Write-Host "ℹ️ Task cleanup could not be completed."
+}
+
+Write-Host "✅ ATOMA Dark Mode initialization complete"
+'@
+
+          Set-Content `
+            -Path $scriptPath `
+            -Value $darkModeScript `
+            -Encoding UTF8 `
+            -Force
+
+          Write-Host "✅ Dark Mode script created:"
+          Write-Host "   $scriptPath"
 
           # ----------------------------------------------------------
-          # CASE 1:
-          # ATOMA profile already exists
+          # Find PowerShell 7
           # ----------------------------------------------------------
 
-          if (Test-Path $userHiveFile) {
+          $pwshCommand = Get-Command pwsh.exe -ErrorAction SilentlyContinue
 
-              Write-Host "📁 Existing ATOMA profile detected:"
-              Write-Host "   $userHiveFile"
-
-              Write-Host "📂 Loading ATOMA NTUSER.DAT..."
-
-              $loadOutput = & reg.exe load `
-                  "HKU\$tempHiveName" `
-                  "$userHiveFile" 2>&1
-
-              if ($LASTEXITCODE -ne 0) {
-
-                  Write-Host $loadOutput
-
-                  throw "❌ Failed to load ATOMA's NTUSER.DAT"
-              }
-
-              try {
-
-                  Set-DarkModeInHive -HiveName $tempHiveName
-
-              }
-              finally {
-
-                  Write-Host "📤 Unloading ATOMA registry hive..."
-
-                  $unloadOutput = & reg.exe unload `
-                      "HKU\$tempHiveName" 2>&1
-
-                  if ($LASTEXITCODE -ne 0) {
-                      Write-Host $unloadOutput
-                      throw "❌ Failed to unload ATOMA registry hive"
-                  }
-
-                  Write-Host "✅ ATOMA registry hive unloaded"
-              }
-
+          if (-not $pwshCommand) {
+              throw "❌ PowerShell 7 (pwsh.exe) was not found."
           }
 
+          $pwshPath = $pwshCommand.Source
+
+          Write-Host "🔧 PowerShell:"
+          Write-Host "   $pwshPath"
+
           # ----------------------------------------------------------
-          # CASE 2:
-          # No profile yet
+          # Scheduled task action
+          # ----------------------------------------------------------
+
+          $action = New-ScheduledTaskAction `
+            -Execute $pwshPath `
+            -Argument `
+              "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$scriptPath`""
+
+          # ----------------------------------------------------------
+          # Trigger at ATOMA logon
+          # ----------------------------------------------------------
+
+          $trigger = New-ScheduledTaskTrigger `
+            -AtLogOn `
+            -User $env:RDP_USERNAME
+
+          # ----------------------------------------------------------
+          # ATOMA principal
           #
-          # Configure Default User so ATOMA inherits Dark Mode
-          # when Windows creates the profile during first logon.
+          # Interactive logon means the task runs in ATOMA's
+          # interactive user session when ATOMA logs in.
           # ----------------------------------------------------------
 
-          else {
+          $principal = New-ScheduledTaskPrincipal `
+            -UserId "$env:COMPUTERNAME\$env:RDP_USERNAME" `
+            -LogonType Interactive `
+            -RunLevel Highest
 
-              Write-Host "ℹ️ ATOMA profile does not exist yet."
-              Write-Host "📁 Using Default User profile instead."
+          # ----------------------------------------------------------
+          # Task settings
+          # ----------------------------------------------------------
 
-              if (-not (Test-Path $defaultHiveFile)) {
-                  throw "❌ Default user NTUSER.DAT not found: $defaultHiveFile"
-              }
+          $settings = New-ScheduledTaskSettingsSet `
+            -AllowStartIfOnBatteries `
+            -DontStopIfGoingOnBatteries `
+            -StartWhenAvailable
 
-              Write-Host "📂 Loading Default User registry hive..."
+          # ----------------------------------------------------------
+          # Register
+          # ----------------------------------------------------------
 
-              $loadOutput = & reg.exe load `
-                  "HKU\$tempHiveName" `
-                  "$defaultHiveFile" 2>&1
+          Write-Host "📅 Registering Dark Mode scheduled task..."
 
-              if ($LASTEXITCODE -ne 0) {
+          Register-ScheduledTask `
+            -TaskName $taskName `
+            -Action $action `
+            -Trigger $trigger `
+            -Principal $principal `
+            -Settings $settings `
+            -Description "Applies Windows Dark Mode to ATOMA at logon." `
+            -Force | Out-Null
 
-                  Write-Host $loadOutput
+          Write-Host "✅ Dark Mode task registered"
 
-                  throw "❌ Failed to load Default User registry hive"
-              }
+          # ----------------------------------------------------------
+          # Verify registration
+          # ----------------------------------------------------------
 
-              try {
-
-                  Set-DarkModeInHive -HiveName $tempHiveName
-
-              }
-              finally {
-
-                  Write-Host "📤 Unloading Default User registry hive..."
-
-                  $unloadOutput = & reg.exe unload `
-                      "HKU\$tempHiveName" 2>&1
-
-                  if ($LASTEXITCODE -ne 0) {
-                      Write-Host $unloadOutput
-                      throw "❌ Failed to unload Default User registry hive"
-                  }
-
-                  Write-Host "✅ Default User registry hive unloaded"
-              }
-
-              Write-Host ""
-              Write-Host "✅ ATOMA will inherit Dark Mode when its Windows profile is created."
-          }
+          $task = Get-ScheduledTask `
+            -TaskName $taskName `
+            -ErrorAction Stop
 
           Write-Host ""
-          Write-Host "🌙 Windows Dark Mode configuration complete."
+          Write-Host "──── Dark Mode Task Verification ────"
+          Write-Host "Task Name : $($task.TaskName)"
+          Write-Host "State     : $($task.State)"
+          Write-Host "User      : $($task.Principal.UserId)"
+          Write-Host "LogonType : $($task.Principal.LogonType)"
+          Write-Host "RunLevel  : $($task.Principal.RunLevel)"
+          Write-Host "Trigger   : AtLogOn"
+          Write-Host "Script    : $scriptPath"
+          Write-Host "────────────────────────────────────"
+          Write-Host ""
+
+          Write-Host "✅ Dark Mode task is ready."
+          Write-Host "ℹ️ Dark Mode is applied when ATOMA starts its Windows session."
 
       # ============================================================
-      # TAILSCALE
+      # TAILSCALE INSTALL
       # ============================================================
 
       - name: 🌐 Install Tailscale v${{ env.TAILSCALE_VERSION }}
@@ -339,19 +404,19 @@ jobs:
           Write-Host "🌐 Installing Tailscale v$env:TAILSCALE_VERSION..."
 
           $tsUrl =
-              "https://pkgs.tailscale.com/stable/" +
-              "tailscale-setup-$env:TAILSCALE_VERSION-amd64.msi"
+            "https://pkgs.tailscale.com/stable/" +
+            "tailscale-setup-$env:TAILSCALE_VERSION-amd64.msi"
 
           $installerPath =
-              "$env:TEMP\tailscale-$env:TAILSCALE_VERSION.msi"
+            "$env:TEMP\tailscale-$env:TAILSCALE_VERSION.msi"
 
-          Write-Host "⬇️ Downloading:"
+          Write-Host "⬇️ Download URL:"
           Write-Host $tsUrl
 
           Invoke-WebRequest `
-              -Uri $tsUrl `
-              -OutFile $installerPath `
-              -UseBasicParsing
+            -Uri $tsUrl `
+            -OutFile $installerPath `
+            -UseBasicParsing
 
           if (-not (Test-Path $installerPath)) {
               throw "❌ Tailscale installer download failed."
@@ -360,33 +425,33 @@ jobs:
           Write-Host "📦 Installing Tailscale..."
 
           $process = Start-Process `
-              -FilePath "msiexec.exe" `
-              -ArgumentList @(
-                  "/i",
-                  "`"$installerPath`"",
-                  "/quiet",
-                  "/norestart"
-              ) `
-              -Wait `
-              -PassThru
+            -FilePath "msiexec.exe" `
+            -ArgumentList @(
+              "/i",
+              "`"$installerPath`"",
+              "/quiet",
+              "/norestart"
+            ) `
+            -Wait `
+            -PassThru
 
           if ($process.ExitCode -ne 0) {
-              throw "❌ Tailscale installation failed with exit code $($process.ExitCode)"
+              throw "❌ Tailscale installation failed with exit code $($process.ExitCode)."
           }
 
           Remove-Item `
-              $installerPath `
-              -Force `
-              -ErrorAction SilentlyContinue
+            $installerPath `
+            -Force `
+            -ErrorAction SilentlyContinue
 
           $tailscaleExe =
-              "$env:ProgramFiles\Tailscale\tailscale.exe"
+            "$env:ProgramFiles\Tailscale\tailscale.exe"
 
           if (-not (Test-Path $tailscaleExe)) {
               throw "❌ tailscale.exe was not found after installation."
           }
 
-          Write-Host "✅ Tailscale installed successfully"
+          Write-Host "✅ Tailscale installed"
 
           Write-Host "🔎 Installed version:"
           & $tailscaleExe version
@@ -402,19 +467,21 @@ jobs:
 
           Write-Host "🔗 Authenticating & joining Tailscale network..."
 
-          if ([string]::IsNullOrWhiteSpace("${{ secrets.TAILSCALE_AUTHKEY }}")) {
+          $authKey = "${{ secrets.TAILSCALE_AUTHKEY }}"
+
+          if ([string]::IsNullOrWhiteSpace($authKey)) {
               throw "❌ TAILSCALE_AUTHKEY secret is missing."
           }
 
           $tailscaleExe =
-              "$env:ProgramFiles\Tailscale\tailscale.exe"
+            "$env:ProgramFiles\Tailscale\tailscale.exe"
 
           $hostname =
-              "gh-runner-$env:GITHUB_RUN_ID"
+            "gh-runner-$env:GITHUB_RUN_ID"
 
           & $tailscaleExe up `
-              --authkey="${{ secrets.TAILSCALE_AUTHKEY }}" `
-              --hostname="$hostname"
+            --authkey="$authKey" `
+            --hostname="$hostname"
 
           if ($LASTEXITCODE -ne 0) {
               throw "❌ Tailscale authentication failed."
@@ -429,8 +496,8 @@ jobs:
               try {
 
                   $candidate =
-                      & $tailscaleExe ip -4 2>$null |
-                      Select-Object -First 1
+                    & $tailscaleExe ip -4 2>$null |
+                    Select-Object -First 1
 
                   if ($candidate) {
                       $tsIP = $candidate.ToString().Trim()
@@ -445,7 +512,7 @@ jobs:
                   break
               }
 
-              Write-Host "⏳ Waiting for Tailscale IPv4 address... ($retry/12)"
+              Write-Host "⏳ Waiting for Tailscale IPv4... ($retry/12)"
               Start-Sleep -Seconds 5
           }
 
@@ -458,7 +525,7 @@ jobs:
           Write-Host "📍 Tailscale IP: $tsIP"
 
       # ============================================================
-      # RDP CONNECTIVITY
+      # VERIFY RDP
       # ============================================================
 
       - name: 🔍 Verify RDP Connectivity
@@ -469,9 +536,9 @@ jobs:
           Write-Host "🔍 Testing RDP port 3389..."
 
           $test = Test-NetConnection `
-              -ComputerName $env:TAILSCALE_IP `
-              -Port 3389 `
-              -WarningAction SilentlyContinue
+            -ComputerName $env:TAILSCALE_IP `
+            -Port 3389 `
+            -WarningAction SilentlyContinue
 
           if (-not $test.TcpTestSucceeded) {
               throw "❌ RDP port 3389 is not reachable."
@@ -492,15 +559,15 @@ jobs:
           Write-Host "📲 Downloading latest Telegram Desktop..."
 
           $tgUrl =
-              "https://telegram.org/dl/desktop/win64"
+            "https://telegram.org/dl/desktop/win64"
 
           $tgInstaller =
-              "$env:TEMP\tsetup.exe"
+            "$env:TEMP\tsetup.exe"
 
           Invoke-WebRequest `
-              -Uri $tgUrl `
-              -OutFile $tgInstaller `
-              -UseBasicParsing
+            -Uri $tgUrl `
+            -OutFile $tgInstaller `
+            -UseBasicParsing
 
           if (-not (Test-Path $tgInstaller)) {
               throw "❌ Telegram installer download failed."
@@ -509,23 +576,23 @@ jobs:
           Write-Host "📲 Installing Telegram Desktop..."
 
           $process = Start-Process `
-              -FilePath $tgInstaller `
-              -ArgumentList @(
-                  "/VERYSILENT",
-                  "/SUPPRESSMSGBOXES",
-                  "/NORESTART"
-              ) `
-              -Wait `
-              -PassThru
+            -FilePath $tgInstaller `
+            -ArgumentList @(
+              "/VERYSILENT",
+              "/SUPPRESSMSGBOXES",
+              "/NORESTART"
+            ) `
+            -Wait `
+            -PassThru
 
           if ($process.ExitCode -ne 0) {
-              throw "❌ Telegram installation failed with exit code $($process.ExitCode)"
+              throw "❌ Telegram installation failed with exit code $($process.ExitCode)."
           }
 
           Remove-Item `
-              $tgInstaller `
-              -Force `
-              -ErrorAction SilentlyContinue
+            $tgInstaller `
+            -Force `
+            -ErrorAction SilentlyContinue
 
           Write-Host "✅ Telegram Desktop installed"
 
@@ -541,16 +608,16 @@ jobs:
           Write-Host "☁️ Downloading latest Cloudflare WARP..."
 
           $warpUrl =
-              "https://1111-releases.cloudflareclient.com/windows/" +
-              "Cloudflare_WARP_Release-x64.msi"
+            "https://1111-releases.cloudflareclient.com/windows/" +
+            "Cloudflare_WARP_Release-x64.msi"
 
           $warpInstaller =
-              "$env:TEMP\warp.msi"
+            "$env:TEMP\warp.msi"
 
           Invoke-WebRequest `
-              -Uri $warpUrl `
-              -OutFile $warpInstaller `
-              -UseBasicParsing
+            -Uri $warpUrl `
+            -OutFile $warpInstaller `
+            -UseBasicParsing
 
           if (-not (Test-Path $warpInstaller)) {
               throw "❌ WARP installer download failed."
@@ -559,33 +626,30 @@ jobs:
           Write-Host "☁️ Installing Cloudflare WARP..."
 
           $process = Start-Process `
-              -FilePath "msiexec.exe" `
-              -ArgumentList @(
-                  "/i",
-                  "`"$warpInstaller`"",
-                  "/quiet",
-                  "/norestart"
-              ) `
-              -Wait `
-              -PassThru
+            -FilePath "msiexec.exe" `
+            -ArgumentList @(
+              "/i",
+              "`"$warpInstaller`"",
+              "/quiet",
+              "/norestart"
+            ) `
+            -Wait `
+            -PassThru
 
           if ($process.ExitCode -ne 0) {
-              throw "❌ WARP installation failed with exit code $($process.ExitCode)"
+              throw "❌ WARP installation failed with exit code $($process.ExitCode)."
           }
 
           Remove-Item `
-              $warpInstaller `
-              -Force `
-              -ErrorAction SilentlyContinue
-
-          # WARP stays OFF.
-          # Tailscale is being used for the RDP path.
+            $warpInstaller `
+            -Force `
+            -ErrorAction SilentlyContinue
 
           Write-Host "✅ Cloudflare WARP installed"
-          Write-Host "☁️ WARP remains disconnected"
+          Write-Host "☁️ WARP remains OFF"
 
       # ============================================================
-      # FINAL STATUS
+      # FINAL ENVIRONMENT CHECK
       # ============================================================
 
       - name: ✅ Final Environment Check
@@ -599,17 +663,17 @@ jobs:
           Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
           Get-ComputerInfo `
-              -Property `
+            -Property `
               WindowsProductName,
               WindowsVersion,
               OsBuildNumber |
-              Format-List
+            Format-List
 
           Write-Host ""
           Write-Host "🌐 TAILSCALE"
 
           $tailscaleExe =
-              "$env:ProgramFiles\Tailscale\tailscale.exe"
+            "$env:ProgramFiles\Tailscale\tailscale.exe"
 
           & $tailscaleExe version
 
@@ -618,8 +682,12 @@ jobs:
           Write-Host $env:TAILSCALE_IP
 
           Write-Host ""
-          Write-Host "🌙 Theme configuration:"
-          Write-Host "Dark Mode requested for user: $env:RDP_USERNAME"
+          Write-Host "👤 RDP User:"
+          Write-Host $env:RDP_USERNAME
+
+          Write-Host ""
+          Write-Host "🌙 Windows Theme:"
+          Write-Host "Dark Mode task configured for ATOMA"
 
           Write-Host ""
           Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -634,7 +702,7 @@ jobs:
         shell: pwsh
         run: |
           $minutesInput =
-              "${{ github.event.inputs.session_minutes }}"
+            "${{ github.event.inputs.session_minutes }}"
 
           if ([string]::IsNullOrWhiteSpace($minutesInput)) {
               $minutesInput = "60"
@@ -648,11 +716,11 @@ jobs:
           }
 
           if ($minutes -lt 1) {
-              throw "❌ session_minutes must be at least 1"
+              throw "❌ session_minutes must be at least 1."
           }
 
           $endTime =
-              (Get-Date).AddMinutes($minutes)
+            (Get-Date).AddMinutes($minutes)
 
           Write-Host ""
           Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -665,6 +733,7 @@ jobs:
           Write-Host "📦 Tailscale      : v$env:TAILSCALE_VERSION"
           Write-Host "📲 Telegram       : Installed"
           Write-Host "☁️ WARP           : Installed / OFF"
+          Write-Host "🔐 RDP NLA        : Enabled"
           Write-Host "⏱️ Duration       : $minutes minutes"
           Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           Write-Host ""
@@ -672,16 +741,16 @@ jobs:
           while ((Get-Date) -lt $endTime) {
 
               $remaining =
-                  [math]::Ceiling(
-                      (
-                          New-TimeSpan `
-                              -Start (Get-Date) `
-                              -End $endTime
-                      ).TotalMinutes
-                  )
+                [math]::Ceiling(
+                  (
+                    New-TimeSpan `
+                      -Start (Get-Date) `
+                      -End $endTime
+                  ).TotalMinutes
+                )
 
               Write-Host `
-                  "[$(Get-Date -Format 'HH:mm:ss')] 🟢 Session alive... ($remaining min remaining)"
+                "[$(Get-Date -Format 'HH:mm:ss')] 🟢 Session alive... ($remaining min remaining)"
 
               Start-Sleep -Seconds 300
           }
