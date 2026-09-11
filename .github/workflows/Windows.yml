@@ -1,4 +1,4 @@
-name: 🪟 Windows Latest TEMP RDP
+name: 🪟 Windows 2025 Server TEMP RDP
 
 on:
   workflow_dispatch:
@@ -17,17 +17,13 @@ jobs:
       RDP_USERNAME: ATOMA
       RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
 
+      # Current Tailscale stable release as of 2026-09-11
+      TAILSCALE_VERSION: "1.102.4"
+
     steps:
-
-      # ============================================================
-      # RDP
-      # ============================================================
-
       - name: 🖥️ Enable Remote Desktop
         shell: pwsh
         run: |
-          $ErrorActionPreference = "Stop"
-
           Write-Host "🖥️ Enabling Remote Desktop Services..."
 
           Set-ItemProperty `
@@ -39,45 +35,34 @@ jobs:
           Set-ItemProperty `
             -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
             -Name 'UserAuthentication' `
-            -Value 1 `
+            -Value 0 `
             -Force
 
           Set-ItemProperty `
             -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
             -Name 'SecurityLayer' `
-            -Value 2 `
+            -Value 0 `
             -Force
 
           netsh advfirewall firewall delete rule name="RDP-Tailscale" | Out-Null
-
           netsh advfirewall firewall add rule `
             name="RDP-Tailscale" `
             dir=in `
             action=allow `
             protocol=TCP `
-            localport=3389 `
-            remoteip=100.64.0.0/10 | Out-Null
+            localport=3389 | Out-Null
 
           Restart-Service -Name TermService -Force
 
-          Write-Host "✅ RDP enabled"
-          Write-Host "✅ NLA enabled"
-          Write-Host "✅ TLS security layer enabled"
-          Write-Host "✅ RDP restricted to Tailscale addresses"
-
-      # ============================================================
-      # ATOMA USER
-      # ============================================================
+          Write-Host "✅ RDP service restarted & firewall rule added"
 
       - name: 👤 Create Administrator User
         shell: pwsh
         run: |
-          $ErrorActionPreference = "Stop"
-
           Write-Host "👤 Setting up user: $env:RDP_USERNAME"
 
           if ([string]::IsNullOrWhiteSpace($env:RDP_PASSWORD)) {
-              Write-Error "❌ RDP_PASSWORD secret is empty or missing."
+              Write-Error "❌ RDP_PASSWORD secret is empty or missing"
               exit 1
           }
 
@@ -91,22 +76,17 @@ jobs:
             -ErrorAction SilentlyContinue
 
           if (-not $existingUser) {
-
               New-LocalUser `
                 -Name $env:RDP_USERNAME `
                 -Password $securePass `
                 -AccountNeverExpires `
-                -PasswordNeverExpires:$false
+                -PasswordNeverExpires `
+                -Description "Temporary RDP administrator"
 
-              Write-Host "✅ ATOMA user created successfully"
+              Write-Host "✅ User created successfully"
           }
           else {
-
-              Set-LocalUser `
-                -Name $env:RDP_USERNAME `
-                -Password $securePass
-
-              Write-Host "ℹ️ ATOMA already exists - password updated"
+              Write-Host "ℹ️ User already exists – reusing"
           }
 
           Add-LocalGroupMember `
@@ -119,22 +99,67 @@ jobs:
             -Member $env:RDP_USERNAME `
             -ErrorAction SilentlyContinue
 
-          Write-Host "✅ ATOMA has Administrator + Remote Desktop rights"
+          Write-Host "🔑 User granted Administrator & Remote Desktop rights"
 
-      # ============================================================
-      # TAILSCALE
-      # ============================================================
-
-      - name: 🌐 Install Tailscale v1.102.4
+      - name: 🌙 Switch ATOMA to Dark Mode
         shell: pwsh
         run: |
-          $ErrorActionPreference = "Stop"
+          Write-Host "🌙 Configuring Windows Dark Mode for $env:RDP_USERNAME..."
 
-          $tsVersion = "1.102.4"
-          $tsUrl = "https://pkgs.tailscale.com/release-candidate/tailscale-setup-$tsVersion-amd64.msi"
-          $installerPath = "$env:TEMP\tailscale-$tsVersion-amd64.msi"
+          $user = Get-LocalUser `
+            -Name $env:RDP_USERNAME `
+            -ErrorAction Stop
 
-          Write-Host "🌐 Downloading Tailscale v$tsVersion..."
+          $sid = $user.SID.Value
+
+          $personalizePath = `
+            "Registry::HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
+
+          New-Item `
+            -Path $personalizePath `
+            -Force | Out-Null
+
+          # 0 = Dark mode
+          # 1 = Light mode
+          New-ItemProperty `
+            -Path $personalizePath `
+            -Name "AppsUseLightTheme" `
+            -PropertyType DWord `
+            -Value 0 `
+            -Force | Out-Null
+
+          New-ItemProperty `
+            -Path $personalizePath `
+            -Name "SystemUsesLightTheme" `
+            -PropertyType DWord `
+            -Value 0 `
+            -Force | Out-Null
+
+          # Optional Windows visual settings
+          New-ItemProperty `
+            -Path $personalizePath `
+            -Name "EnableTransparency" `
+            -PropertyType DWord `
+            -Value 1 `
+            -Force | Out-Null
+
+          Write-Host "✅ Dark Mode configured for $env:RDP_USERNAME"
+          Write-Host "   AppsUseLightTheme   = 0"
+          Write-Host "   SystemUsesLightTheme = 0"
+
+      - name: 🌐 Install Tailscale ${{ env.TAILSCALE_VERSION }}
+        shell: pwsh
+        run: |
+          Write-Host "🌐 Installing Tailscale v$env:TAILSCALE_VERSION..."
+
+          $tsUrl = `
+            "https://pkgs.tailscale.com/stable/" +
+            "tailscale-setup-$env:TAILSCALE_VERSION-amd64.msi"
+
+          $installerPath = "$env:TEMP\tailscale-$env:TAILSCALE_VERSION.msi"
+
+          Write-Host "⬇️ Download URL:"
+          Write-Host $tsUrl
 
           Invoke-WebRequest `
             -Uri $tsUrl `
@@ -142,7 +167,7 @@ jobs:
             -UseBasicParsing
 
           if (-not (Test-Path $installerPath)) {
-              Write-Error "❌ Tailscale installer was not downloaded."
+              Write-Error "❌ Tailscale installer download failed"
               exit 1
           }
 
@@ -160,107 +185,142 @@ jobs:
             -PassThru
 
           if ($process.ExitCode -ne 0) {
-              Write-Error "❌ Tailscale installation failed: $($process.ExitCode)"
+              Write-Error "❌ Tailscale installation failed with exit code $($process.ExitCode)"
               exit $process.ExitCode
           }
 
-          Remove-Item `
-            $installerPath `
-            -Force `
-            -ErrorAction SilentlyContinue
+          Remove-Item $installerPath -Force -ErrorAction SilentlyContinue
 
-          $tsExe = "$env:ProgramFiles\Tailscale\tailscale.exe"
+          $tailscaleExe = "$env:ProgramFiles\Tailscale\tailscale.exe"
 
-          if (-not (Test-Path $tsExe)) {
-              Write-Error "❌ tailscale.exe not found."
+          if (-not (Test-Path $tailscaleExe)) {
+              Write-Error "❌ tailscale.exe was not found after installation"
               exit 1
           }
 
-          Write-Host "✅ Tailscale installed:"
-          & $tsExe version
+          Write-Host "✅ Tailscale installed successfully"
+
+          Write-Host "🔎 Installed Tailscale version:"
+          & $tailscaleExe version
 
       - name: 🔗 Connect to Tailscale Mesh
         shell: pwsh
         run: |
-          $ErrorActionPreference = "Stop"
-
-          $tsExe = "$env:ProgramFiles\Tailscale\tailscale.exe"
+          Write-Host "🔗 Authenticating & joining Tailscale network..."
 
           if ([string]::IsNullOrWhiteSpace("${{ secrets.TAILSCALE_AUTHKEY }}")) {
-              Write-Error "❌ TAILSCALE_AUTHKEY secret is missing."
+              Write-Error "❌ TAILSCALE_AUTHKEY secret is missing"
               exit 1
           }
 
-          Write-Host "🔗 Joining Tailscale network..."
+          $tailscaleExe = "$env:ProgramFiles\Tailscale\tailscale.exe"
 
-          & $tsExe up `
+          & $tailscaleExe up `
             --authkey="${{ secrets.TAILSCALE_AUTHKEY }}" `
             --hostname="gh-runner-$env:GITHUB_RUN_ID"
 
           if ($LASTEXITCODE -ne 0) {
-              Write-Error "❌ Tailscale connection failed."
+              Write-Error "❌ Tailscale authentication/join failed"
               exit $LASTEXITCODE
           }
 
-          Write-Host "⏳ Waiting for Tailscale IPv4 address..."
+          Write-Host "✅ Tailscale authentication successful"
 
           $tsIP = $null
           $retries = 0
 
-          while (-not $tsIP -and $retries -lt 20) {
-
-              $output = & $tsExe ip -4 2>$null
-
-              if ($output) {
-
-                  $candidate = (
-                      $output |
-                      Select-Object -First 1
-                  ).ToString().Trim()
-
-                  if ($candidate -match '^100\.(\d{1,3}\.){2}\d{1,3}$') {
-                      $tsIP = $candidate
-                  }
+          while (-not $tsIP -and $retries -lt 12) {
+              try {
+                  $tsIP = (& $tailscaleExe ip -4 2>$null | Select-Object -First 1).Trim()
+              }
+              catch {
+                  $tsIP = $null
               }
 
-              if (-not $tsIP) {
-                  Start-Sleep -Seconds 3
+              if ($tsIP) {
+                  break
               }
 
+              Write-Host "⏳ Waiting for Tailscale IP..."
+              Start-Sleep -Seconds 5
               $retries++
           }
 
           if (-not $tsIP) {
-              Write-Error "❌ Failed to obtain Tailscale IPv4 address."
-              & $tsExe status
+              Write-Error "❌ Failed to obtain Tailscale IPv4 address"
               exit 1
           }
 
-          "TAILSCALE_IP=$tsIP" | Out-File `
-            -FilePath $env:GITHUB_ENV `
-            -Encoding utf8 `
-            -Append
+          "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
 
-          Write-Host ""
           Write-Host "📍 Tailscale IP: $tsIP"
 
-          Write-Host ""
-          Write-Host "🔎 Tailscale status:"
-          & $tsExe status
+      - name: 🔍 Verify RDP Connectivity
+        shell: pwsh
+        run: |
+          Write-Host "🔍 Testing RDP port 3389 on $env:TAILSCALE_IP..."
 
-      # ============================================================
-      # CLOUDFLARE WARP
-      # ============================================================
+          $test = Test-NetConnection `
+            -ComputerName $env:TAILSCALE_IP `
+            -Port 3389 `
+            -WarningAction SilentlyContinue
+
+          if (-not $test.TcpTestSucceeded) {
+              Write-Error "❌ RDP port is not reachable"
+              exit 1
+          }
+
+          Write-Host "✅ RDP port is open and reachable"
+
+      - name: 📲 Install Telegram Desktop (latest)
+        shell: pwsh
+        run: |
+          Write-Host "📲 Downloading latest Telegram Desktop..."
+
+          $tgUrl = "https://telegram.org/dl/desktop/win64"
+          $tgInstaller = "$env:TEMP\tsetup.exe"
+
+          Invoke-WebRequest `
+            -Uri $tgUrl `
+            -OutFile $tgInstaller `
+            -UseBasicParsing
+
+          if (-not (Test-Path $tgInstaller)) {
+              Write-Error "❌ Telegram installer download failed"
+              exit 1
+          }
+
+          Write-Host "📲 Installing Telegram Desktop silently..."
+
+          $process = Start-Process `
+            -FilePath $tgInstaller `
+            -ArgumentList @(
+              "/VERYSILENT",
+              "/SUPPRESSMSGBOXES",
+              "/NORESTART"
+            ) `
+            -Wait `
+            -PassThru
+
+          if ($process.ExitCode -ne 0) {
+              Write-Error "❌ Telegram installation failed with exit code $($process.ExitCode)"
+              exit $process.ExitCode
+          }
+
+          Remove-Item $tgInstaller -Force -ErrorAction SilentlyContinue
+
+          Write-Host "✅ Telegram Desktop installed"
 
       - name: ☁️ Install Cloudflare WARP
         shell: pwsh
         run: |
-          $ErrorActionPreference = "Stop"
-
           Write-Host "☁️ Downloading latest Cloudflare WARP..."
 
-          $warpUrl = "https://1111-releases.cloudflareclient.com/windows/Cloudflare_WARP_Release-x64.msi"
-          $warpInstaller = "$env:TEMP\Cloudflare_WARP_Release-x64.msi"
+          $warpUrl = `
+            "https://1111-releases.cloudflareclient.com/windows/" +
+            "Cloudflare_WARP_Release-x64.msi"
+
+          $warpInstaller = "$env:TEMP\warp.msi"
 
           Invoke-WebRequest `
             -Uri $warpUrl `
@@ -268,11 +328,11 @@ jobs:
             -UseBasicParsing
 
           if (-not (Test-Path $warpInstaller)) {
-              Write-Error "❌ WARP installer was not downloaded."
+              Write-Error "❌ WARP installer download failed"
               exit 1
           }
 
-          Write-Host "📦 Installing Cloudflare WARP..."
+          Write-Host "☁️ Installing Cloudflare WARP silently..."
 
           $process = Start-Process `
             -FilePath "msiexec.exe" `
@@ -286,271 +346,52 @@ jobs:
             -PassThru
 
           if ($process.ExitCode -ne 0) {
-              Write-Error "❌ WARP installation failed: $($process.ExitCode)"
+              Write-Error "❌ WARP installation failed with exit code $($process.ExitCode)"
               exit $process.ExitCode
           }
 
-          Remove-Item `
-            $warpInstaller `
-            -Force `
-            -ErrorAction SilentlyContinue
+          Remove-Item $warpInstaller -Force -ErrorAction SilentlyContinue
 
-          $warpCli = "C:\Program Files\Cloudflare\Cloudflare WARP\warp-cli.exe"
+          # Deliberately do not enable WARP automatically.
+          # Tailscale is already providing the RDP path.
+          Write-Host "✅ Cloudflare WARP installed and left disconnected"
 
-          if (-not (Test-Path $warpCli)) {
-              Write-Error "❌ warp-cli.exe was not found."
-              exit 1
-          }
-
-          Write-Host "✅ Cloudflare WARP installed."
-          Write-Host "📍 WARP CLI: $warpCli"
-
-          Write-Host ""
-          Write-Host "🔎 WARP CLI version:"
-          & $warpCli --version
-
-      - name: 🔗 Connect Cloudflare WARP
+      - name: 🖥️ Final Windows Environment Check
         shell: pwsh
         run: |
-          $ErrorActionPreference = "Stop"
+          Write-Host "🖥️ Windows environment:"
+          Get-ComputerInfo -Property `
+            WindowsProductName,
+            WindowsVersion,
+            OsBuildNumber | Format-List
 
-          $warpCli = "C:\Program Files\Cloudflare\Cloudflare WARP\warp-cli.exe"
+          Write-Host "🌓 Dark Mode registry values for $env:RDP_USERNAME:"
 
-          if (-not (Test-Path $warpCli)) {
-              Write-Error "❌ warp-cli.exe not found."
-              exit 1
+          $user = Get-LocalUser -Name $env:RDP_USERNAME
+          $sid = $user.SID.Value
+
+          $personalizePath = `
+            "Registry::HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
+
+          $appsMode = `
+            (Get-ItemProperty `
+              -Path $personalizePath `
+              -Name AppsUseLightTheme).AppsUseLightTheme
+
+          $systemMode = `
+            (Get-ItemProperty `
+              -Path $personalizePath `
+              -Name SystemUsesLightTheme).SystemUsesLightTheme
+
+          Write-Host "   AppsUseLightTheme    = $appsMode"
+          Write-Host "   SystemUsesLightTheme = $systemMode"
+
+          if ($appsMode -eq 0 -and $systemMode -eq 0) {
+              Write-Host "✅ Dark Mode is configured"
           }
-
-          Write-Host "☁️ Connecting WARP using warp-cli..."
-
-          & $warpCli connect
-
-          if ($LASTEXITCODE -ne 0) {
-              Write-Error "❌ warp-cli connect failed with exit code $LASTEXITCODE"
-              exit $LASTEXITCODE
+          else {
+              Write-Warning "⚠️ Dark Mode registry values were not set as expected"
           }
-
-          Write-Host "⏳ Waiting for WARP..."
-
-          Start-Sleep -Seconds 10
-
-          Write-Host ""
-          Write-Host "🔎 WARP status:"
-          & $warpCli status
-
-          Write-Host ""
-          Write-Host "✅ WARP connect command completed."
-
-      # ============================================================
-      # VERIFY NETWORK AFTER WARP
-      # ============================================================
-
-      - name: 🔍 Verify Tailscale + RDP After WARP
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-
-          $tsExe = "$env:ProgramFiles\Tailscale\tailscale.exe"
-
-          Write-Host "🔎 Checking Tailscale after WARP connection..."
-
-          & $tsExe status
-
-          $tsIP = $env:TAILSCALE_IP
-
-          if ([string]::IsNullOrWhiteSpace($tsIP)) {
-              Write-Error "❌ Tailscale IP is missing."
-              exit 1
-          }
-
-          Write-Host ""
-          Write-Host "🔍 Testing RDP on $tsIP`:3389..."
-
-          $test = Test-NetConnection `
-            -ComputerName $tsIP `
-            -Port 3389 `
-            -WarningAction SilentlyContinue
-
-          if (-not $test.TcpTestSucceeded) {
-              Write-Error "❌ RDP is not reachable after WARP connected."
-              Write-Host "⚠️ WARP may have changed the networking state."
-              exit 1
-          }
-
-          Write-Host "✅ Tailscale is active."
-          Write-Host "✅ RDP remains reachable."
-
-      # ============================================================
-      # TELEGRAM
-      # ============================================================
-
-      - name: 📲 Install Telegram Desktop
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-
-          Write-Host "📲 Downloading latest Telegram Desktop..."
-
-          $tgUrl = "https://telegram.org/dl/desktop/win64"
-          $tgInstaller = "$env:TEMP\tsetup.exe"
-
-          Invoke-WebRequest `
-            -Uri $tgUrl `
-            -OutFile $tgInstaller `
-            -UseBasicParsing
-
-          if (-not (Test-Path $tgInstaller)) {
-              Write-Error "❌ Telegram installer was not downloaded."
-              exit 1
-          }
-
-          Write-Host "📲 Installing Telegram Desktop..."
-
-          $process = Start-Process `
-            -FilePath $tgInstaller `
-            -ArgumentList @(
-              "/VERYSILENT",
-              "/SUPPRESSMSGBOXES",
-              "/NORESTART"
-            ) `
-            -Wait `
-            -PassThru
-
-          if ($process.ExitCode -ne 0) {
-              Write-Error "❌ Telegram installation failed: $($process.ExitCode)"
-              exit $process.ExitCode
-          }
-
-          Remove-Item `
-            $tgInstaller `
-            -Force `
-            -ErrorAction SilentlyContinue
-
-          Write-Host "✅ Telegram Desktop installation finished."
-
-      # ============================================================
-      # ATOMA DESKTOP SHORTCUT
-      # ============================================================
-
-      - name: 🖥️ Create Telegram Desktop Shortcut for ATOMA
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-
-          Write-Host "🖥️ Creating Telegram shortcut for ATOMA..."
-
-          $atomaHome = "C:\Users\$env:RDP_USERNAME"
-          $desktop = Join-Path $atomaHome "Desktop"
-
-          if (-not (Test-Path $desktop)) {
-              New-Item `
-                -ItemType Directory `
-                -Path $desktop `
-                -Force | Out-Null
-          }
-
-          # Common Telegram installation paths
-          $possibleTelegramPaths = @(
-              "$env:ProgramFiles\Telegram Desktop\Telegram.exe",
-              "$env:ProgramFiles(x86)\Telegram Desktop\Telegram.exe",
-              "$atomaHome\AppData\Roaming\Telegram Desktop\Telegram.exe",
-              "$atomaHome\AppData\Local\Telegram Desktop\Telegram.exe"
-          )
-
-          $telegramExe = $null
-
-          foreach ($path in $possibleTelegramPaths) {
-
-              if ($path -and (Test-Path $path)) {
-                  $telegramExe = $path
-                  break
-              }
-          }
-
-          # Fallback search
-          if (-not $telegramExe) {
-
-              Write-Host "🔎 Searching for Telegram.exe..."
-
-              $searchRoots = @(
-                  $env:ProgramFiles,
-                  ${env:ProgramFiles(x86)},
-                  "C:\Users"
-              ) | Where-Object {
-                  $_ -and (Test-Path $_)
-              }
-
-              foreach ($root in $searchRoots) {
-
-                  try {
-
-                      $found = Get-ChildItem `
-                        -Path $root `
-                        -Filter "Telegram.exe" `
-                        -File `
-                        -Recurse `
-                        -ErrorAction SilentlyContinue |
-                        Select-Object -First 1
-
-                      if ($found) {
-                          $telegramExe = $found.FullName
-                          break
-                      }
-                  }
-                  catch {
-                  }
-              }
-          }
-
-          if (-not $telegramExe) {
-              Write-Error "❌ Telegram.exe could not be found."
-              exit 1
-          }
-
-          Write-Host ""
-          Write-Host "✅ Telegram executable:"
-          Write-Host $telegramExe
-
-          $shortcutPath = Join-Path $desktop "Telegram.lnk"
-
-          $shell = New-Object -ComObject WScript.Shell
-
-          $shortcut = $shell.CreateShortcut($shortcutPath)
-
-          $shortcut.TargetPath = $telegramExe
-          $shortcut.WorkingDirectory = Split-Path $telegramExe
-          $shortcut.Description = "Telegram Desktop"
-          $shortcut.IconLocation = "$telegramExe,0"
-
-          $shortcut.Save()
-
-          [System.Runtime.InteropServices.Marshal]::ReleaseComObject($shortcut) |
-            Out-Null
-
-          [System.Runtime.InteropServices.Marshal]::ReleaseComObject($shell) |
-            Out-Null
-
-          Write-Host ""
-          Write-Host "✅ Telegram shortcut created:"
-          Write-Host $shortcutPath
-
-      - name: 🔎 Verify Telegram Shortcut
-        shell: pwsh
-        run: |
-          $desktop = "C:\Users\$env:RDP_USERNAME\Desktop"
-          $shortcut = Join-Path $desktop "Telegram.lnk"
-
-          if (-not (Test-Path $shortcut)) {
-              Write-Error "❌ Telegram desktop shortcut was not created."
-              exit 1
-          }
-
-          Write-Host "✅ Telegram desktop shortcut verified:"
-          Write-Host $shortcut
-
-      # ============================================================
-      # KEEP ALIVE
-      # ============================================================
 
       - name: ⏳ Keep Alive & Display Connection Info
         shell: pwsh
@@ -561,26 +402,16 @@ jobs:
               $minutesInput = "60"
           }
 
-          $minutes = 0
+          $minutes = [int]$minutesInput
 
-          if (-not [int]::TryParse(
-              $minutesInput,
-              [ref]$minutes
-          )) {
-              Write-Error "❌ session_minutes must be a valid integer."
-              exit 1
+          if ($minutes -gt 350) {
+              Write-Host "⚠️ session_minutes capped at 350 minutes"
+              $minutes = 350
           }
 
           if ($minutes -lt 1) {
-              Write-Error "❌ session_minutes must be at least 1."
+              Write-Error "❌ session_minutes must be at least 1"
               exit 1
-          }
-
-          # GitHub job timeout = 360 minutes.
-          # Keep 5 minutes of headroom.
-          if ($minutes -gt 355) {
-              Write-Host "⚠️ session_minutes capped at 355 minutes."
-              $minutes = 355
           }
 
           $endTime = (Get-Date).AddMinutes($minutes)
@@ -589,35 +420,30 @@ jobs:
           Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           Write-Host "🟢 TEMPORARY RDP SESSION IS READY"
           Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          Write-Host ""
-          Write-Host "🖥️ Runner         : windows-latest"
           Write-Host "👤 Username       : $env:RDP_USERNAME"
           Write-Host "🌐 Tailscale IP   : $env:TAILSCALE_IP"
-          Write-Host "🔐 Password       : hidden - GitHub Secret"
-          Write-Host "⏱️  Duration       : $minutes minutes"
-          Write-Host "📦 Tailscale      : v1.102.4"
-          Write-Host "☁️ WARP           : connected"
-          Write-Host "📲 Telegram       : installed"
-          Write-Host "🖥️ Shortcut       : C:\Users\ATOMA\Desktop\Telegram.lnk"
-          Write-Host "🔒 RDP            : NLA + TLS"
-          Write-Host ""
+          Write-Host "🔐 Password       : (hidden – GitHub Secret)"
+          Write-Host "🌙 Windows Theme  : Dark"
+          Write-Host "📦 Tailscale      : v$env:TAILSCALE_VERSION"
+          Write-Host "📲 Telegram       : Installed"
+          Write-Host "☁️ WARP           : Installed / OFF"
+          Write-Host "⏱️ Duration       : $minutes minutes"
           Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          Write-Host ""
 
           while ((Get-Date) -lt $endTime) {
-
               $remaining = [math]::Ceiling(
-                  (New-TimeSpan `
-                    -Start (Get-Date) `
-                    -End $endTime
-                  ).TotalMinutes
+                (New-TimeSpan `
+                  -Start (Get-Date) `
+                  -End $endTime
+                ).TotalMinutes
               )
 
-              Write-Host `
-                "[$(Get-Date -Format 'HH:mm:ss')] 🟢 Session alive... ($remaining min remaining)"
+              Write-Host "[$(Get-Date -Format 'HH:mm:ss')] 🟢 Session alive... ($remaining min remaining)"
 
               Start-Sleep -Seconds 300
           }
 
           Write-Host ""
           Write-Host "⏹️ Session duration reached."
-          Write-Host "🧹 GitHub-hosted runner will be destroyed after the job ends."
+          Write-Host "🗑️ GitHub-hosted runner will be destroyed after the job ends."
