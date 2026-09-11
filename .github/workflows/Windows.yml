@@ -1,4 +1,4 @@
-name: 🪟 Windows 2025 Server TEMP RDP
+name: 🪟 Windows Latest TEMP RDP
 
 on:
   workflow_dispatch:
@@ -10,180 +10,614 @@ on:
 
 jobs:
   secure-rdp:
-    runs-on: windows-2025
+    runs-on: windows-latest
     timeout-minutes: 360
 
     env:
       RDP_USERNAME: ATOMA
-      RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}   # 🔐 Pulled from GitHub Secrets
+      RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
 
     steps:
+
+      # ============================================================
+      # RDP
+      # ============================================================
+
       - name: 🖥️ Enable Remote Desktop
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+
           Write-Host "🖥️ Enabling Remote Desktop Services..."
 
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
-            -Name 'fDenyTSConnections' -Value 0 -Force
+          Set-ItemProperty `
+            -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+            -Name 'fDenyTSConnections' `
+            -Value 0 `
+            -Force
 
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-            -Name 'UserAuthentication' -Value 0 -Force
+          Set-ItemProperty `
+            -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+            -Name 'UserAuthentication' `
+            -Value 1 `
+            -Force
 
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-            -Name 'SecurityLayer' -Value 0 -Force
+          Set-ItemProperty `
+            -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+            -Name 'SecurityLayer' `
+            -Value 2 `
+            -Force
 
           netsh advfirewall firewall delete rule name="RDP-Tailscale" | Out-Null
-          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389 | Out-Null
+
+          netsh advfirewall firewall add rule `
+            name="RDP-Tailscale" `
+            dir=in `
+            action=allow `
+            protocol=TCP `
+            localport=3389 `
+            remoteip=100.64.0.0/10 | Out-Null
 
           Restart-Service -Name TermService -Force
-          Write-Host "✅ RDP service restarted & firewall rule added"
+
+          Write-Host "✅ RDP enabled"
+          Write-Host "✅ NLA enabled"
+          Write-Host "✅ TLS security layer enabled"
+          Write-Host "✅ RDP restricted to Tailscale addresses"
+
+      # ============================================================
+      # ATOMA USER
+      # ============================================================
 
       - name: 👤 Create Administrator User
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+
           Write-Host "👤 Setting up user: $env:RDP_USERNAME"
 
-          $securePass = ConvertTo-SecureString $env:RDP_PASSWORD -AsPlainText -Force
-
-          if (-not (Get-LocalUser -Name $env:RDP_USERNAME -ErrorAction SilentlyContinue)) {
-              New-LocalUser -Name $env:RDP_USERNAME -Password $securePass -AccountNeverExpires
-              Write-Host "✅ User created successfully"
-          } else {
-              Write-Host "ℹ️ User already exists – reusing"
+          if ([string]::IsNullOrWhiteSpace($env:RDP_PASSWORD)) {
+              Write-Error "❌ RDP_PASSWORD secret is empty or missing."
+              exit 1
           }
 
-          Add-LocalGroupMember -Group "Administrators" -Member $env:RDP_USERNAME -ErrorAction SilentlyContinue
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $env:RDP_USERNAME -ErrorAction SilentlyContinue
-          Write-Host "🔑 User granted Administrator & Remote Desktop rights"
+          $securePass = ConvertTo-SecureString `
+            $env:RDP_PASSWORD `
+            -AsPlainText `
+            -Force
 
-      - name: 🌐 Install Tailscale VPN
+          $existingUser = Get-LocalUser `
+            -Name $env:RDP_USERNAME `
+            -ErrorAction SilentlyContinue
+
+          if (-not $existingUser) {
+
+              New-LocalUser `
+                -Name $env:RDP_USERNAME `
+                -Password $securePass `
+                -AccountNeverExpires `
+                -PasswordNeverExpires:$false
+
+              Write-Host "✅ ATOMA user created successfully"
+          }
+          else {
+
+              Set-LocalUser `
+                -Name $env:RDP_USERNAME `
+                -Password $securePass
+
+              Write-Host "ℹ️ ATOMA already exists - password updated"
+          }
+
+          Add-LocalGroupMember `
+            -Group "Administrators" `
+            -Member $env:RDP_USERNAME `
+            -ErrorAction SilentlyContinue
+
+          Add-LocalGroupMember `
+            -Group "Remote Desktop Users" `
+            -Member $env:RDP_USERNAME `
+            -ErrorAction SilentlyContinue
+
+          Write-Host "✅ ATOMA has Administrator + Remote Desktop rights"
+
+      # ============================================================
+      # TAILSCALE
+      # ============================================================
+
+      - name: 🌐 Install Tailscale v1.102.4
         shell: pwsh
         run: |
-          Write-Host "🌐 Downloading Tailscale..."
+          $ErrorActionPreference = "Stop"
 
-          # Pinned version checked against Tailscale's own stable package
-          # index at time of writing — still current on the Windows/MSI
-          # track, not stale (macOS Homebrew was one patch ahead, which is
-          # normal cross-channel lag, not a sign this URL is out of date).
-          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.98.8-amd64.msi"
-          $installerPath = "$env:TEMP\tailscale.msi"
+          $tsVersion = "1.102.4"
+          $tsUrl = "https://pkgs.tailscale.com/release-candidate/tailscale-setup-$tsVersion-amd64.msi"
+          $installerPath = "$env:TEMP\tailscale-$tsVersion-amd64.msi"
 
-          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
-          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
-          Remove-Item $installerPath -Force
+          Write-Host "🌐 Downloading Tailscale v$tsVersion..."
 
-          Write-Host "✅ Tailscale installed"
+          Invoke-WebRequest `
+            -Uri $tsUrl `
+            -OutFile $installerPath `
+            -UseBasicParsing
+
+          if (-not (Test-Path $installerPath)) {
+              Write-Error "❌ Tailscale installer was not downloaded."
+              exit 1
+          }
+
+          Write-Host "📦 Installing Tailscale..."
+
+          $process = Start-Process `
+            -FilePath "msiexec.exe" `
+            -ArgumentList @(
+              "/i",
+              "`"$installerPath`"",
+              "/quiet",
+              "/norestart"
+            ) `
+            -Wait `
+            -PassThru
+
+          if ($process.ExitCode -ne 0) {
+              Write-Error "❌ Tailscale installation failed: $($process.ExitCode)"
+              exit $process.ExitCode
+          }
+
+          Remove-Item `
+            $installerPath `
+            -Force `
+            -ErrorAction SilentlyContinue
+
+          $tsExe = "$env:ProgramFiles\Tailscale\tailscale.exe"
+
+          if (-not (Test-Path $tsExe)) {
+              Write-Error "❌ tailscale.exe not found."
+              exit 1
+          }
+
+          Write-Host "✅ Tailscale installed:"
+          & $tsExe version
 
       - name: 🔗 Connect to Tailscale Mesh
         shell: pwsh
         run: |
-          Write-Host "🔗 Authenticating & joining Tailscale network..."
+          $ErrorActionPreference = "Stop"
 
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTHKEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
+          $tsExe = "$env:ProgramFiles\Tailscale\tailscale.exe"
+
+          if ([string]::IsNullOrWhiteSpace("${{ secrets.TAILSCALE_AUTHKEY }}")) {
+              Write-Error "❌ TAILSCALE_AUTHKEY secret is missing."
+              exit 1
+          }
+
+          Write-Host "🔗 Joining Tailscale network..."
+
+          & $tsExe up `
+            --authkey="${{ secrets.TAILSCALE_AUTHKEY }}" `
+            --hostname="gh-runner-$env:GITHUB_RUN_ID"
+
+          if ($LASTEXITCODE -ne 0) {
+              Write-Error "❌ Tailscale connection failed."
+              exit $LASTEXITCODE
+          }
+
+          Write-Host "⏳ Waiting for Tailscale IPv4 address..."
 
           $tsIP = $null
           $retries = 0
 
-          while (-not $tsIP -and $retries -lt 10) {
-              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
-              Start-Sleep -Seconds 5
+          while (-not $tsIP -and $retries -lt 20) {
+
+              $output = & $tsExe ip -4 2>$null
+
+              if ($output) {
+
+                  $candidate = (
+                      $output |
+                      Select-Object -First 1
+                  ).ToString().Trim()
+
+                  if ($candidate -match '^100\.(\d{1,3}\.){2}\d{1,3}$') {
+                      $tsIP = $candidate
+                  }
+              }
+
+              if (-not $tsIP) {
+                  Start-Sleep -Seconds 3
+              }
+
               $retries++
           }
 
           if (-not $tsIP) {
-              Write-Error "❌ Failed to obtain Tailscale IP"
+              Write-Error "❌ Failed to obtain Tailscale IPv4 address."
+              & $tsExe status
               exit 1
           }
 
-          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+          "TAILSCALE_IP=$tsIP" | Out-File `
+            -FilePath $env:GITHUB_ENV `
+            -Encoding utf8 `
+            -Append
+
+          Write-Host ""
           Write-Host "📍 Tailscale IP: $tsIP"
 
-      - name: 🔍 Verify RDP Connectivity
+          Write-Host ""
+          Write-Host "🔎 Tailscale status:"
+          & $tsExe status
+
+      # ============================================================
+      # CLOUDFLARE WARP
+      # ============================================================
+
+      - name: ☁️ Install Cloudflare WARP
         shell: pwsh
         run: |
-          Write-Host "🔍 Testing RDP port 3389 on $env:TAILSCALE_IP..."
+          $ErrorActionPreference = "Stop"
 
-          $test = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
+          Write-Host "☁️ Downloading latest Cloudflare WARP..."
 
-          if (-not $test.TcpTestSucceeded) {
-              Write-Error "❌ RDP port is not reachable"
+          $warpUrl = "https://1111-releases.cloudflareclient.com/windows/Cloudflare_WARP_Release-x64.msi"
+          $warpInstaller = "$env:TEMP\Cloudflare_WARP_Release-x64.msi"
+
+          Invoke-WebRequest `
+            -Uri $warpUrl `
+            -OutFile $warpInstaller `
+            -UseBasicParsing
+
+          if (-not (Test-Path $warpInstaller)) {
+              Write-Error "❌ WARP installer was not downloaded."
               exit 1
           }
 
-          Write-Host "✅ RDP port is open and reachable"
+          Write-Host "📦 Installing Cloudflare WARP..."
 
-      - name: 📲 Install Telegram Desktop (latest)
+          $process = Start-Process `
+            -FilePath "msiexec.exe" `
+            -ArgumentList @(
+              "/i",
+              "`"$warpInstaller`"",
+              "/quiet",
+              "/norestart"
+            ) `
+            -Wait `
+            -PassThru
+
+          if ($process.ExitCode -ne 0) {
+              Write-Error "❌ WARP installation failed: $($process.ExitCode)"
+              exit $process.ExitCode
+          }
+
+          Remove-Item `
+            $warpInstaller `
+            -Force `
+            -ErrorAction SilentlyContinue
+
+          $warpCli = "C:\Program Files\Cloudflare\Cloudflare WARP\warp-cli.exe"
+
+          if (-not (Test-Path $warpCli)) {
+              Write-Error "❌ warp-cli.exe was not found."
+              exit 1
+          }
+
+          Write-Host "✅ Cloudflare WARP installed."
+          Write-Host "📍 WARP CLI: $warpCli"
+
+          Write-Host ""
+          Write-Host "🔎 WARP CLI version:"
+          & $warpCli --version
+
+      - name: 🔗 Connect Cloudflare WARP
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+
+          $warpCli = "C:\Program Files\Cloudflare\Cloudflare WARP\warp-cli.exe"
+
+          if (-not (Test-Path $warpCli)) {
+              Write-Error "❌ warp-cli.exe not found."
+              exit 1
+          }
+
+          Write-Host "☁️ Connecting WARP using warp-cli..."
+
+          & $warpCli connect
+
+          if ($LASTEXITCODE -ne 0) {
+              Write-Error "❌ warp-cli connect failed with exit code $LASTEXITCODE"
+              exit $LASTEXITCODE
+          }
+
+          Write-Host "⏳ Waiting for WARP..."
+
+          Start-Sleep -Seconds 10
+
+          Write-Host ""
+          Write-Host "🔎 WARP status:"
+          & $warpCli status
+
+          Write-Host ""
+          Write-Host "✅ WARP connect command completed."
+
+      # ============================================================
+      # VERIFY NETWORK AFTER WARP
+      # ============================================================
+
+      - name: 🔍 Verify Tailscale + RDP After WARP
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $tsExe = "$env:ProgramFiles\Tailscale\tailscale.exe"
+
+          Write-Host "🔎 Checking Tailscale after WARP connection..."
+
+          & $tsExe status
+
+          $tsIP = $env:TAILSCALE_IP
+
+          if ([string]::IsNullOrWhiteSpace($tsIP)) {
+              Write-Error "❌ Tailscale IP is missing."
+              exit 1
+          }
+
+          Write-Host ""
+          Write-Host "🔍 Testing RDP on $tsIP`:3389..."
+
+          $test = Test-NetConnection `
+            -ComputerName $tsIP `
+            -Port 3389 `
+            -WarningAction SilentlyContinue
+
+          if (-not $test.TcpTestSucceeded) {
+              Write-Error "❌ RDP is not reachable after WARP connected."
+              Write-Host "⚠️ WARP may have changed the networking state."
+              exit 1
+          }
+
+          Write-Host "✅ Tailscale is active."
+          Write-Host "✅ RDP remains reachable."
+
+      # ============================================================
+      # TELEGRAM
+      # ============================================================
+
+      - name: 📲 Install Telegram Desktop
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
           Write-Host "📲 Downloading latest Telegram Desktop..."
 
-          # telegram.org's own redirect always serves the current release —
-          # no version number to go stale, same pattern as the Tailscale step.
           $tgUrl = "https://telegram.org/dl/desktop/win64"
           $tgInstaller = "$env:TEMP\tsetup.exe"
 
-          Invoke-WebRequest -Uri $tgUrl -OutFile $tgInstaller
+          Invoke-WebRequest `
+            -Uri $tgUrl `
+            -OutFile $tgInstaller `
+            -UseBasicParsing
 
-          Write-Host "📲 Installing Telegram Desktop silently..."
-          # Telegram's installer is Inno Setup based; these are its documented
-          # unattended flags (verified current as of mid-2026 guides).
-          Start-Process -FilePath $tgInstaller -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART" -Wait
+          if (-not (Test-Path $tgInstaller)) {
+              Write-Error "❌ Telegram installer was not downloaded."
+              exit 1
+          }
 
-          Remove-Item $tgInstaller -Force
-          Write-Host "✅ Telegram Desktop installed"
+          Write-Host "📲 Installing Telegram Desktop..."
 
-      - name: ☁️ Install Cloudflare WARP (1.1.1.1)
+          $process = Start-Process `
+            -FilePath $tgInstaller `
+            -ArgumentList @(
+              "/VERYSILENT",
+              "/SUPPRESSMSGBOXES",
+              "/NORESTART"
+            ) `
+            -Wait `
+            -PassThru
+
+          if ($process.ExitCode -ne 0) {
+              Write-Error "❌ Telegram installation failed: $($process.ExitCode)"
+              exit $process.ExitCode
+          }
+
+          Remove-Item `
+            $tgInstaller `
+            -Force `
+            -ErrorAction SilentlyContinue
+
+          Write-Host "✅ Telegram Desktop installation finished."
+
+      # ============================================================
+      # ATOMA DESKTOP SHORTCUT
+      # ============================================================
+
+      - name: 🖥️ Create Telegram Desktop Shortcut for ATOMA
         shell: pwsh
         run: |
-          Write-Host "☁️ Downloading latest Cloudflare WARP..."
+          $ErrorActionPreference = "Stop"
 
-          # Cloudflare's own release CDN — no version number in the path,
-          # always serves the current build.
-          $warpUrl = "https://1111-releases.cloudflareclient.com/windows/Cloudflare_WARP_Release-x64.msi"
-          $warpInstaller = "$env:TEMP\warp.msi"
+          Write-Host "🖥️ Creating Telegram shortcut for ATOMA..."
 
-          Invoke-WebRequest -Uri $warpUrl -OutFile $warpInstaller
+          $atomaHome = "C:\Users\$env:RDP_USERNAME"
+          $desktop = Join-Path $atomaHome "Desktop"
 
-          Write-Host "☁️ Installing Cloudflare WARP silently..."
-          Start-Process msiexec.exe -ArgumentList "/i", "`"$warpInstaller`"", "/quiet", "/norestart" -Wait
+          if (-not (Test-Path $desktop)) {
+              New-Item `
+                -ItemType Directory `
+                -Path $desktop `
+                -Force | Out-Null
+          }
 
-          Remove-Item $warpInstaller -Force
+          # Common Telegram installation paths
+          $possibleTelegramPaths = @(
+              "$env:ProgramFiles\Telegram Desktop\Telegram.exe",
+              "$env:ProgramFiles(x86)\Telegram Desktop\Telegram.exe",
+              "$atomaHome\AppData\Roaming\Telegram Desktop\Telegram.exe",
+              "$atomaHome\AppData\Local\Telegram Desktop\Telegram.exe"
+          )
 
-          # ⚠️ Deliberately installed but NOT auto-connected. WARP is a
-          # full-tunnel VPN — if it auto-connects it can take over the
-          # default route and cut the Tailscale path this RDP session is
-          # running over, locking you out mid-session. Toggle it on
-          # manually from inside the desktop once you're already connected,
-          # so if it does affect routing, you're there to see it happen.
-          Write-Host "✅ Cloudflare WARP installed (left disconnected on purpose — see comment above)"
+          $telegramExe = $null
+
+          foreach ($path in $possibleTelegramPaths) {
+
+              if ($path -and (Test-Path $path)) {
+                  $telegramExe = $path
+                  break
+              }
+          }
+
+          # Fallback search
+          if (-not $telegramExe) {
+
+              Write-Host "🔎 Searching for Telegram.exe..."
+
+              $searchRoots = @(
+                  $env:ProgramFiles,
+                  ${env:ProgramFiles(x86)},
+                  "C:\Users"
+              ) | Where-Object {
+                  $_ -and (Test-Path $_)
+              }
+
+              foreach ($root in $searchRoots) {
+
+                  try {
+
+                      $found = Get-ChildItem `
+                        -Path $root `
+                        -Filter "Telegram.exe" `
+                        -File `
+                        -Recurse `
+                        -ErrorAction SilentlyContinue |
+                        Select-Object -First 1
+
+                      if ($found) {
+                          $telegramExe = $found.FullName
+                          break
+                      }
+                  }
+                  catch {
+                  }
+              }
+          }
+
+          if (-not $telegramExe) {
+              Write-Error "❌ Telegram.exe could not be found."
+              exit 1
+          }
+
+          Write-Host ""
+          Write-Host "✅ Telegram executable:"
+          Write-Host $telegramExe
+
+          $shortcutPath = Join-Path $desktop "Telegram.lnk"
+
+          $shell = New-Object -ComObject WScript.Shell
+
+          $shortcut = $shell.CreateShortcut($shortcutPath)
+
+          $shortcut.TargetPath = $telegramExe
+          $shortcut.WorkingDirectory = Split-Path $telegramExe
+          $shortcut.Description = "Telegram Desktop"
+          $shortcut.IconLocation = "$telegramExe,0"
+
+          $shortcut.Save()
+
+          [System.Runtime.InteropServices.Marshal]::ReleaseComObject($shortcut) |
+            Out-Null
+
+          [System.Runtime.InteropServices.Marshal]::ReleaseComObject($shell) |
+            Out-Null
+
+          Write-Host ""
+          Write-Host "✅ Telegram shortcut created:"
+          Write-Host $shortcutPath
+
+      - name: 🔎 Verify Telegram Shortcut
+        shell: pwsh
+        run: |
+          $desktop = "C:\Users\$env:RDP_USERNAME\Desktop"
+          $shortcut = Join-Path $desktop "Telegram.lnk"
+
+          if (-not (Test-Path $shortcut)) {
+              Write-Error "❌ Telegram desktop shortcut was not created."
+              exit 1
+          }
+
+          Write-Host "✅ Telegram desktop shortcut verified:"
+          Write-Host $shortcut
+
+      # ============================================================
+      # KEEP ALIVE
+      # ============================================================
 
       - name: ⏳ Keep Alive & Display Connection Info
         shell: pwsh
         run: |
           $minutesInput = "${{ github.event.inputs.session_minutes }}"
-          if ([string]::IsNullOrWhiteSpace($minutesInput)) { $minutesInput = "60" }
-          $minutes = [int]$minutesInput
 
-          if ($minutes -gt 360) {
-              Write-Host "⚠️ session_minutes capped at 335 (job timeout-minutes is 350; this leaves headroom for setup/teardown)"
-              $minutes = 335
+          if ([string]::IsNullOrWhiteSpace($minutesInput)) {
+              $minutesInput = "60"
+          }
+
+          $minutes = 0
+
+          if (-not [int]::TryParse(
+              $minutesInput,
+              [ref]$minutes
+          )) {
+              Write-Error "❌ session_minutes must be a valid integer."
+              exit 1
+          }
+
+          if ($minutes -lt 1) {
+              Write-Error "❌ session_minutes must be at least 1."
+              exit 1
+          }
+
+          # GitHub job timeout = 360 minutes.
+          # Keep 5 minutes of headroom.
+          if ($minutes -gt 355) {
+              Write-Host "⚠️ session_minutes capped at 355 minutes."
+              $minutes = 355
           }
 
           $endTime = (Get-Date).AddMinutes($minutes)
 
-          Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          Write-Host ""
+          Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           Write-Host "🟢 TEMPORARY RDP SESSION IS READY"
-          Write-Host "👤 Username      : $env:RDP_USERNAME"
-          Write-Host "🌐 Tailscale IP  : $env:TAILSCALE_IP"
-          Write-Host "🔐 Password      : (hidden – see repo secrets)"
-          Write-Host "⏱️  Duration      : $minutes minutes"
-          Write-Host "📲 Telegram Desktop installed | ☁️ Cloudflare WARP installed (off)"
-          Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          Write-Host ""
+          Write-Host "🖥️ Runner         : windows-latest"
+          Write-Host "👤 Username       : $env:RDP_USERNAME"
+          Write-Host "🌐 Tailscale IP   : $env:TAILSCALE_IP"
+          Write-Host "🔐 Password       : hidden - GitHub Secret"
+          Write-Host "⏱️  Duration       : $minutes minutes"
+          Write-Host "📦 Tailscale      : v1.102.4"
+          Write-Host "☁️ WARP           : connected"
+          Write-Host "📲 Telegram       : installed"
+          Write-Host "🖥️ Shortcut       : C:\Users\ATOMA\Desktop\Telegram.lnk"
+          Write-Host "🔒 RDP            : NLA + TLS"
+          Write-Host ""
+          Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
           while ((Get-Date) -lt $endTime) {
-              $remaining = [math]::Ceiling((New-TimeSpan -Start (Get-Date) -End $endTime).TotalMinutes)
-              Write-Host "[$(Get-Date -Format 'HH:mm:ss')] 🟢 Session alive... ($remaining min remaining)"
+
+              $remaining = [math]::Ceiling(
+                  (New-TimeSpan `
+                    -Start (Get-Date) `
+                    -End $endTime
+                  ).TotalMinutes
+              )
+
+              Write-Host `
+                "[$(Get-Date -Format 'HH:mm:ss')] 🟢 Session alive... ($remaining min remaining)"
+
               Start-Sleep -Seconds 300
           }
 
-          Write-Host "⏹️ Session duration reached — job will now end and the runner will be destroyed."
+          Write-Host ""
+          Write-Host "⏹️ Session duration reached."
+          Write-Host "🧹 GitHub-hosted runner will be destroyed after the job ends."
