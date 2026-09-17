@@ -1,0 +1,406 @@
+name: 🪟 Windows 2025 Server TEMP RDP
+
+on:
+  workflow_dispatch:
+    inputs:
+      session_minutes:
+        description: "How long to keep the session alive (minutes)"
+        required: false
+        default: "360"
+
+jobs:
+  secure-rdp:
+    runs-on: windows-latest
+    timeout-minutes: 360
+
+    env:
+      RDP_USERNAME: ATOMA
+      RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}   # 🔐 Pulled from GitHub Secrets
+
+    steps:
+      - name: 🖥️ Enable Remote Desktop
+        shell: pwsh
+        run: |
+          Write-Host "🖥️ Enabling Remote Desktop Services..."
+
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+            -Name 'fDenyTSConnections' -Value 0 -Force
+
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+            -Name 'UserAuthentication' -Value 0 -Force
+
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+            -Name 'SecurityLayer' -Value 0 -Force
+
+          netsh advfirewall firewall delete rule name="RDP-Tailscale" | Out-Null
+          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389 | Out-Null
+
+          Restart-Service -Name TermService -Force
+          Write-Host "✅ RDP service restarted & firewall rule added"
+
+      - name: 👤 Create Administrator User
+        shell: pwsh
+        run: |
+          Write-Host "👤 Setting up user: $env:RDP_USERNAME"
+
+          $securePass = ConvertTo-SecureString $env:RDP_PASSWORD -AsPlainText -Force
+
+          if (-not (Get-LocalUser -Name $env:RDP_USERNAME -ErrorAction SilentlyContinue)) {
+              New-LocalUser -Name $env:RDP_USERNAME -Password $securePass -AccountNeverExpires
+              Write-Host "✅ User created successfully"
+          } else {
+              Write-Host "ℹ️ User already exists – reusing"
+          }
+
+          Add-LocalGroupMember -Group "Administrators" -Member $env:RDP_USERNAME -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $env:RDP_USERNAME -ErrorAction SilentlyContinue
+          Write-Host "🔑 User granted Administrator & Remote Desktop rights"
+
+      - name: 📦 Winget Bootstrap (refresh winget source only)
+        shell: pwsh
+        run: |
+          Write-Host "📦 Checking winget..."
+
+          # windows-latest (Windows Server 2025) ships winget preinstalled,
+          # but its local package index is whatever was baked into the
+          # runner image at build time. A manifest that changed since
+          # then (WhatsApp.WhatsApp is a real example: it now installs a
+          # Microsoft-CDN-hosted MSIX rather than the old Electron .exe)
+          # can be missing from that stale local index, surfacing as
+          # "No package found matching input criteria." even though the
+          # package genuinely exists in the source.
+          #
+          # The fix is `winget source update --name winget` — scoped to
+          # ONLY the winget community source. This is deliberately
+          # narrower than a bare `winget source update`, which also
+          # refreshes msstore and is known to fail intermittently doing
+          # so (network hiccups, region/agreement re-prompts) even when
+          # the winget source itself is fine — see
+          # microsoft/winget-cli#3090 and winget-pkgs#247000/#246543.
+          # That msstore flakiness is what broke this exact step
+          # earlier: the unscoped call left a stray non-zero
+          # $LASTEXITCODE that PowerShell 7.4's default
+          # $PSNativeCommandUseErrorActionPreference turned into a
+          # step failure right after this step's own success message
+          # had already printed. Scoping to --name winget avoids
+          # touching msstore at all, so that failure mode doesn't
+          # apply here — but the same documented pattern
+          # ($PSNativeCommandUseErrorActionPreference = $false, then
+          # check $LASTEXITCODE manually) is used below anyway, so a
+          # transient hiccup on the winget source itself is reported
+          # clearly instead of silently corrupting the step's exit
+          # code the same way.
+          $PSNativeCommandUseErrorActionPreference = $false
+
+          winget --version
+
+          winget source update --name winget --accept-source-agreements
+          $sourceUpdateExitCode = $LASTEXITCODE
+
+          if ($sourceUpdateExitCode -ne 0) {
+              Write-Host "⚠️ winget source update --name winget returned exit code $sourceUpdateExitCode — continuing anyway, since a transient index-refresh hiccup here doesn't necessarily block later installs, and each winget call further down passes its own --accept-source-agreements / --accept-package-agreements regardless"
+          }
+
+          Write-Host "✅ winget is available and its package index has been refreshed"
+
+      - name: 🌐 Install Tailscale via winget
+        shell: pwsh
+        run: |
+          Write-Host "🌐 Installing Tailscale via winget..."
+
+          winget install `
+              --id Tailscale.Tailscale `
+              --source winget `
+              --exact `
+              --silent `
+              --accept-package-agreements `
+              --accept-source-agreements `
+              --disable-interactivity
+
+          if ($LASTEXITCODE -ne 0) {
+              Write-Error "❌ Failed to install Tailscale (exit code $LASTEXITCODE)"
+              exit 1
+          }
+
+          Write-Host "✅ Tailscale installed"
+
+      - name: 🔗 Connect to Tailscale Mesh
+        shell: pwsh
+        run: |
+          Write-Host "🔗 Authenticating & joining Tailscale network..."
+
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTHKEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
+
+          $tsIP = $null
+          $retries = 0
+
+          while (-not $tsIP -and $retries -lt 10) {
+              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+              Start-Sleep -Seconds 5
+              $retries++
+          }
+
+          if (-not $tsIP) {
+              Write-Error "❌ Failed to obtain Tailscale IP"
+              exit 1
+          }
+
+          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+          Write-Host "📍 Tailscale IP: $tsIP"
+
+      - name: 🔍 Verify RDP Connectivity
+        shell: pwsh
+        run: |
+          Write-Host "🔍 Testing RDP port 3389 on $env:TAILSCALE_IP..."
+
+          $test = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
+
+          if (-not $test.TcpTestSucceeded) {
+              Write-Error "❌ RDP port is not reachable"
+              exit 1
+          }
+
+          Write-Host "✅ RDP port is open and reachable"
+
+      - name: ☁️ Install Cloudflare WARP via winget
+        shell: pwsh
+        run: |
+          Write-Host "☁️ Installing Cloudflare WARP via winget..."
+
+          winget install `
+              --id Cloudflare.Warp `
+              --source winget `
+              --exact `
+              --silent `
+              --accept-package-agreements `
+              --accept-source-agreements `
+              --disable-interactivity
+
+          if ($LASTEXITCODE -ne 0) {
+              Write-Error "❌ Failed to install Cloudflare WARP (exit code $LASTEXITCODE)"
+              exit 1
+          }
+
+          Write-Host "✅ Cloudflare WARP installed"
+
+      - name: ☁️ Connect to Cloudflare WARP (warp-cli)
+        shell: pwsh
+        run: |
+          Write-Host "☁️ Registering and connecting Cloudflare WARP..."
+
+          # ⚠️ This runs AFTER the Tailscale-IP verification step above on
+          # purpose. WARP is a full-tunnel VPN — connecting it can take
+          # over the default route. Doing that before Tailscale is up and
+          # confirmed reachable risks cutting the path this RDP session
+          # depends on. By this point Tailscale is already verified
+          # working, so if WARP does affect routing, the RDP session
+          # itself isn't the thing that breaks first.
+          $warpCli = "$env:ProgramFiles\Cloudflare\Cloudflare WARP\warp-cli.exe"
+
+          if (-not (Test-Path $warpCli)) {
+              Write-Error "❌ warp-cli.exe not found at expected path: $warpCli"
+              exit 1
+          }
+
+          # A fresh WARP install has no device registration yet, and
+          # `warp-cli connect` fails on an unregistered client — it has
+          # to be registered first. `registration new` is the current
+          # documented subcommand (the bare `register` alias still works
+          # on most builds, but this is the form Cloudflare's own docs
+          # use). On a device that's already registered it returns a
+          # non-zero exit code instead of no-op'ing, and that's an
+          # expected, non-fatal outcome here, not a real failure.
+          #
+          # PowerShell 7.4+ defaults $PSNativeCommandUseErrorActionPreference
+          # to $true, which throws a terminating NativeCommandExitException
+          # the moment any native command like warp-cli.exe returns a
+          # non-zero exit code — before this script would even reach an
+          # `if ($LASTEXITCODE -ne 0)` check of its own. Per the PowerShell
+          # team's own documented guidance for commands with meaningful
+          # non-zero exit codes (see PowerShell/PowerShell#20034), that
+          # behavior is disabled here for the scope of this step only, so
+          # $LASTEXITCODE can be inspected manually instead.
+          $PSNativeCommandUseErrorActionPreference = $false
+
+          & $warpCli --accept-tos registration new
+          $registerExitCode = $LASTEXITCODE
+
+          if ($registerExitCode -ne 0) {
+              Write-Host "ℹ️ warp-cli registration returned exit code $registerExitCode (commonly means this device is already registered) — continuing to connect"
+          }
+
+          & $warpCli --accept-tos connect
+          $connectExitCode = $LASTEXITCODE
+
+          if ($connectExitCode -ne 0) {
+              Write-Error "❌ warp-cli connect failed (exit code $connectExitCode)"
+              exit 1
+          }
+
+          $warpStatus = $null
+          $retries = 0
+
+          while ($retries -lt 10) {
+              $warpStatus = & $warpCli --accept-tos status | Out-String
+              if ($warpStatus -match "Connected") {
+                  break
+              }
+              Start-Sleep -Seconds 3
+              $retries++
+          }
+
+          if ($warpStatus -notmatch "Connected") {
+              Write-Error "❌ Cloudflare WARP did not report Connected status after $retries retries: $warpStatus"
+              exit 1
+          }
+
+          Write-Host "✅ Cloudflare WARP connected"
+
+      - name: 🧩 Install remaining apps via winget (WhatsApp, Telegram, Google Drive)
+        shell: pwsh
+        run: |
+          # Tailscale and Cloudflare WARP already have their own install
+          # + connect steps earlier in this workflow, in that order, as
+          # requested. This step only installs the apps that don't need
+          # any connect/auth step of their own.
+          #
+          # A note on WhatsApp specifically: WhatsApp.WhatsApp is a live,
+          # actively-maintained manifest in the winget community source
+          # — it currently installs via a direct Microsoft-CDN-hosted
+          # MSIX download (get.microsoft.com/installer/download/...),
+          # NOT through the Microsoft Store client or the separate
+          # msstore source, so it does not depend on the Store being
+          # present on this OS. If this step ever reports "No package
+          # found matching input criteria" (exit -1978335212) again,
+          # that means the runner's local winget package index is stale
+          # relative to the source — the "Winget Bootstrap" step earlier
+          # in this workflow refreshes that index with
+          # `winget source update --name winget` specifically to
+          # prevent this.
+          #
+          # Gmail has no installable Windows desktop client — it is a
+          # website (mail.google.com), so there is no winget package for
+          # it. Chrome (updated further below) is how it gets used on
+          # this box.
+          $apps = @(
+              @{ Name = "WhatsApp";     Id = "WhatsApp.WhatsApp" },
+              @{ Name = "Telegram";     Id = "Telegram.TelegramDesktop" },
+              @{ Name = "Google Drive"; Id = "Google.GoogleDrive" }
+          )
+
+          foreach ($app in $apps) {
+              Write-Host "📥 Installing $($app.Name) [$($app.Id)] via winget..."
+
+              winget install `
+                  --id $($app.Id) `
+                  --source winget `
+                  --exact `
+                  --silent `
+                  --force `
+                  --accept-package-agreements `
+                  --accept-source-agreements `
+                  --disable-interactivity
+
+              # winget returns 0 on a fresh install AND when the exact
+              # same version is already present ("no newer package
+              # versions are available" is still success). Anything else
+              # is a real failure and should stop the job rather than
+              # silently continuing with a missing app. --force is
+              # included above specifically for WhatsApp: its manifest
+              # has a documented history of installer-hash mismatches
+              # (microsoft/winget-pkgs#111741, microsoft/winget-cli#650)
+              # when the published installer is updated slightly out of
+              # step with the manifest's recorded hash — --force
+              # proceeds past that specific check rather than failing
+              # the whole job over it. It's a no-op for packages that
+              # don't hit that condition.
+              if ($LASTEXITCODE -ne 0) {
+                  Write-Error "❌ Failed to install $($app.Name) (exit code $LASTEXITCODE)"
+                  exit 1
+              }
+
+              Write-Host "✅ $($app.Name) installed"
+          }
+
+          Write-Host "✅ WhatsApp, Telegram, and Google Drive installed"
+
+      - name: 🔄 Update Google Chrome via winget
+        shell: pwsh
+        run: |
+          Write-Host "🔄 Checking for a Google Chrome update via winget..."
+
+          winget upgrade `
+              --id Google.Chrome `
+              --source winget `
+              --exact `
+              --silent `
+              --accept-package-agreements `
+              --accept-source-agreements `
+              --disable-interactivity
+
+          # "No applicable update found" is winget's normal response when
+          # Chrome is already on the latest version — that is a success
+          # case for this step, not a failure, so it must not be allowed
+          # to fail the job. Only stop on an exit code that isn't one of
+          # the two success shapes: a clean upgrade (0) or an
+          # already-up-to-date result. If Chrome isn't found on the
+          # runner at all (a real winget error), the log will show it
+          # here and the message below still won't lie about it, since
+          # we only claim success after confirming the code.
+          $updateExitCode = $LASTEXITCODE
+
+          if ($updateExitCode -eq 0) {
+              Write-Host "✅ Google Chrome updated to the latest version"
+          } else {
+              # Query winget directly instead of guessing from the exit
+              # code alone, since "already up to date" and "nothing to
+              # upgrade" can surface as different non-zero codes across
+              # winget releases. This call exists to diagnose a failure
+              # path, so it must not itself be able to throw and hide
+              # the real error message below — disable
+              # $PSNativeCommandUseErrorActionPreference for it, same as
+              # the WARP registration step above.
+              $PSNativeCommandUseErrorActionPreference = $false
+              $listOutput = winget list --id Google.Chrome --source winget --exact 2>&1 | Out-String
+
+              if ($listOutput -match "Google Chrome") {
+                  Write-Host "ℹ️ Google Chrome is already up to date (winget exit code $updateExitCode)"
+              } else {
+                  Write-Error "❌ Google Chrome update failed and Chrome could not be confirmed as installed (exit code $updateExitCode)"
+                  exit 1
+              }
+          }
+
+      - name: ⏳ Keep Alive & Display Connection Info
+        shell: pwsh
+        run: |
+          $minutesInput = "${{ github.event.inputs.session_minutes }}"
+          if ([string]::IsNullOrWhiteSpace($minutesInput)) { $minutesInput = "60" }
+          $minutes = [int]$minutesInput
+
+          if ($minutes -gt 360) {
+              Write-Host "⚠️ session_minutes capped at 335 (job timeout-minutes is 350; this leaves headroom for setup/teardown)"
+              $minutes = 335
+          }
+
+          $endTime = (Get-Date).AddMinutes($minutes)
+
+          Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          Write-Host "🟢 TEMPORARY RDP SESSION IS READY"
+          Write-Host "👤 Username      : $env:RDP_USERNAME"
+          Write-Host "🌐 Tailscale IP  : $env:TAILSCALE_IP"
+          Write-Host "🔐 Password      : (hidden – see repo secrets)"
+          Write-Host "⏱️  Duration      : $minutes minutes"
+          Write-Host "🌐 Tailscale installed & connected"
+          Write-Host "☁️ Cloudflare WARP installed & connected via warp-cli"
+          Write-Host "📲 WhatsApp, Telegram, and Google Drive installed via winget"
+          Write-Host "🌍 Google Chrome updated via winget"
+          Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+          while ((Get-Date) -lt $endTime) {
+              $remaining = [math]::Ceiling((New-TimeSpan -Start (Get-Date) -End $endTime).TotalMinutes)
+              Write-Host "[$(Get-Date -Format 'HH:mm:ss')] 🟢 Session alive... ($remaining min remaining)"
+              Start-Sleep -Seconds 300
+          }
+
+          Write-Host "⏹️ Session duration reached — job will now end and the runner will be destroyed."
