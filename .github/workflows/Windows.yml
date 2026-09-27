@@ -1,0 +1,785 @@
+name: 🪟 Windows 2025 Server TEMP RDP
+
+on:
+  workflow_dispatch:
+    inputs:
+      session_minutes:
+        description: "How long to keep the session alive (minutes)"
+        required: false
+        default: "360"
+
+jobs:
+  secure-rdp:
+    runs-on: windows-latest
+    timeout-minutes: 360
+
+    env:
+      RDP_USERNAME: ATOMA
+      RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}   # 🔐 Pulled from GitHub Secrets
+
+    steps:
+      - name: 🖥️ Enable Remote Desktop
+        shell: pwsh
+        run: |
+          Write-Host "🖥️ Enabling Remote Desktop Services..."
+
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+            -Name 'fDenyTSConnections' -Value 0 -Force
+
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+            -Name 'UserAuthentication' -Value 0 -Force
+
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+            -Name 'SecurityLayer' -Value 0 -Force
+
+          netsh advfirewall firewall delete rule name="RDP-Tailscale" | Out-Null
+          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389 | Out-Null
+
+          Restart-Service -Name TermService -Force
+          Write-Host "✅ RDP service restarted & firewall rule added"
+
+      - name: 👤 Create Administrator User
+        shell: pwsh
+        run: |
+          Write-Host "👤 Setting up user: $env:RDP_USERNAME"
+
+          $securePass = ConvertTo-SecureString $env:RDP_PASSWORD -AsPlainText -Force
+
+          if (-not (Get-LocalUser -Name $env:RDP_USERNAME -ErrorAction SilentlyContinue)) {
+              New-LocalUser -Name $env:RDP_USERNAME -Password $securePass -AccountNeverExpires
+              Write-Host "✅ User created successfully"
+          } else {
+              Write-Host "ℹ️ User already exists – reusing"
+          }
+
+          Add-LocalGroupMember -Group "Administrators" -Member $env:RDP_USERNAME -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $env:RDP_USERNAME -ErrorAction SilentlyContinue
+          Write-Host "🔑 User granted Administrator & Remote Desktop rights"
+
+      - name: 📦 Winget Bootstrap (refresh winget source only)
+        shell: pwsh
+        run: |
+          Write-Host "📦 Checking winget..."
+
+          # windows-latest (Windows Server 2025) ships winget preinstalled,
+          # but its local package index is whatever was baked into the
+          # runner image at build time. A manifest that changed since
+          # then (WhatsApp.WhatsApp is a real example: it now installs a
+          # Microsoft-CDN-hosted MSIX rather than the old Electron .exe)
+          # can be missing from that stale local index, surfacing as
+          # "No package found matching input criteria." even though the
+          # package genuinely exists in the source.
+          #
+          # The fix is `winget source update --name winget` — scoped to
+          # ONLY the winget community source, matching the official
+          # example in winget-cli's own doc/windows/package-manager/
+          # winget/source.md. This is deliberately narrower than a bare
+          # `winget source update`, which also refreshes msstore and is
+          # known to fail intermittently doing so (network hiccups,
+          # region/agreement re-prompts) even when the winget source
+          # itself is fine — see microsoft/winget-cli#3090 and
+          # winget-pkgs#247000/#246543.
+          #
+          # NOTE: --accept-source-agreements is NOT a valid flag for
+          # `source update` — that was an earlier mistake in this
+          # workflow, confirmed wrong by the live winget binary's own
+          # error output ("Argument name was not recognized for the
+          # current command"). That flag exists only for install/
+          # upgrade-family commands (see winget-cli's own
+          # doc/windows/package-manager/winget/upgrade.md); `source
+          # update`'s actual accepted options are --name, --wait,
+          # --logs, --verbose, --nowarn, --disable-interactivity,
+          # --proxy, and --no-proxy — nothing agreement-related.
+          # --disable-interactivity is used below instead: several
+          # winget-cli issues (e.g. #1736, #1559, #5243) show that even
+          # a `winget` source operation can incidentally evaluate the
+          # implicit msstore source and trigger its agreement prompt,
+          # and since there's no flag to pre-accept that prompt here,
+          # --disable-interactivity ensures it fails cleanly instead of
+          # hanging the runner waiting for keyboard input that will
+          # never come.
+          #
+          # This step also uses the documented
+          # $PSNativeCommandUseErrorActionPreference = $false pattern
+          # (see PowerShell/PowerShell#20034) so that whatever exit
+          # code this call returns is inspected manually via
+          # $LASTEXITCODE rather than PowerShell 7.4's default behavior
+          # converting a non-zero exit code into a terminating
+          # exception right where it happens.
+          $PSNativeCommandUseErrorActionPreference = $false
+
+          winget --version
+
+          winget source update --name winget --disable-interactivity
+          $sourceUpdateExitCode = $LASTEXITCODE
+
+          if ($sourceUpdateExitCode -ne 0) {
+              Write-Host "⚠️ winget source update --name winget returned exit code $sourceUpdateExitCode — continuing anyway, since a transient index-refresh hiccup here doesn't necessarily block later installs, and each winget call further down passes its own --accept-source-agreements / --accept-package-agreements regardless"
+          }
+
+          Write-Host "✅ winget is available and its package index has been refreshed"
+
+      - name: ⬆️ Self-update winget to the latest stable release
+        shell: pwsh
+        run: |
+          Write-Host "⬆️ Checking whether a newer stable winget release is available..."
+
+          # windows-2025-vs2026 runner images ship whatever winget
+          # version was current when the image was built — often a full
+          # major/minor version or more behind the actual latest stable
+          # release (e.g. the runner reporting v1.11.510 while v1.28.x
+          # is current). `winget upgrade winget` (alias:
+          # `winget upgrade Microsoft.AppInstaller`) is the officially
+          # documented self-update path for winget 1.6+ — see
+          # microsoft/winget-cli discussion #4100 and Microsoft's own
+          # msix-docs. This runner is already well past 1.6, so it's
+          # supported here.
+          #
+          # This is deliberately its OWN step, run before any package
+          # installs, and not combined with any other winget call.
+          # winget upgrading its own running executable mid-batch is a
+          # documented failure mode — microsoft/winget-cli#4283 shows
+          # `winget upgrade --all` aborting the entire batch partway
+          # through specifically when it reaches its own App Installer
+          # package. Running it alone, first, and checked independently
+          # avoids that.
+          $PSNativeCommandUseErrorActionPreference = $false
+
+          winget upgrade winget `
+              --source winget `
+              --silent `
+              --accept-package-agreements `
+              --accept-source-agreements `
+              --disable-interactivity
+
+          $selfUpdateExitCode = $LASTEXITCODE
+
+          winget --version
+
+          if ($selfUpdateExitCode -eq 0) {
+              Write-Host "✅ winget self-updated to the latest stable release"
+          } else {
+              # "No applicable update found" (already latest) is a
+              # normal, non-fatal outcome here, exactly like the Chrome
+              # update step further down — confirm via `winget list`
+              # rather than treating every non-zero code as a real
+              # failure, since a transient self-update hiccup shouldn't
+              # block the rest of this job when the runner's existing
+              # winget version is already confirmed working above.
+              $listOutput = winget list --id Microsoft.AppInstaller --source winget --exact 2>&1 | Out-String
+
+              if ($listOutput -match "App Installer") {
+                  Write-Host "ℹ️ winget is already at the latest stable release (exit code $selfUpdateExitCode)"
+              } else {
+                  Write-Host "⚠️ winget self-update returned exit code $selfUpdateExitCode and App Installer could not be confirmed via winget list — continuing anyway with the runner's existing winget version rather than failing the whole job over a self-update check"
+              }
+          }
+
+          # Explicit exit 0: a self-update hiccup should never fail the
+          # job, so this step ends deterministically rather than relying
+          # on whatever $LASTEXITCODE the diagnostic winget list call
+          # above happened to leave.
+          exit 0
+
+      - name: 🧰 Prepare shared winget helper function
+        shell: pwsh
+        run: |
+          # A single shared function, Install-WingetPackage, is written
+          # here to a .ps1 file and dot-sourced (". <path>") at the top
+          # of every later step that installs or upgrades a package via
+          # winget. GitHub Actions runs each step's `run:` block as its
+          # own separate pwsh process, so a function defined in one step
+          # is NOT available in another — dot-sourcing a shared file is
+          # the standard way to reuse the same logic across steps
+          # without copying and separately maintaining several slightly
+          # different versions of it, which is exactly how this
+          # workflow accumulated inconsistent error handling across its
+          # different install steps over its history.
+          #
+          # The function:
+          # - never throws and never calls exit — it always returns
+          #   $true or $false, so every calling step decides for itself
+          #   whether that particular package is critical (Tailscale,
+          #   WARP: the calling step still exits 1 on $false, since the
+          #   whole point of this workflow depends on them) or optional
+          #   (WhatsApp, Google Drive, Chrome: the calling step just
+          #   logs and moves on, per "don't stop the workflow over one
+          #   app").
+          # - captures winget's own output text and checks it for "No
+          #   package found", so if a package ID is ever renamed or
+          #   removed upstream again (as happened with
+          #   WhatsApp.WhatsApp earlier in this workflow's history),
+          #   the log says so plainly and points at winget-pkgs to find
+          #   the current ID, rather than just printing a bare exit
+          #   code that has to be looked up separately.
+          # - treats winget upgrade's "no applicable update" result as
+          #   success (confirmed via `winget list`) rather than a
+          #   failure, matching how winget itself treats an
+          #   already-current package.
+          $helperLines = @(
+              'function Install-WingetPackage {',
+              '    param(',
+              '        [Parameter(Mandatory)][string]$Name,',
+              '        [Parameter(Mandatory)][string]$Id,',
+              '        [string]$Source = "winget",',
+              '        [switch]$Upgrade',
+              '    )',
+              '',
+              '    $PSNativeCommandUseErrorActionPreference = $false',
+              '    $verb = if ($Upgrade) { "upgrade" } else { "install" }',
+              '',
+              '    Write-Host "📥 Running winget $verb for $Name [$Id] (source: $Source)..."',
+              '',
+              '    $output = winget $verb `',
+              '        --id $Id `',
+              '        --source $Source `',
+              '        --exact `',
+              '        --silent `',
+              '        --force `',
+              '        --accept-package-agreements `',
+              '        --accept-source-agreements `',
+              '        --disable-interactivity 2>&1 | Out-String',
+              '',
+              '    $exitCode = $LASTEXITCODE',
+              '    if ($output) { Write-Host $output.Trim() }',
+              '',
+              '    if ($exitCode -eq 0) {',
+              '        Write-Host "✅ $Name $verb succeeded"',
+              '        return $true',
+              '    }',
+              '',
+              '    if ($Upgrade) {',
+              '        $listOutput = winget list --id $Id --source $Source --exact 2>&1 | Out-String',
+              '        if ($listOutput -notmatch "No installed package found") {',
+              '            Write-Host "ℹ️ $Name is already up to date (winget exit code $exitCode) - treating as success"',
+              '            return $true',
+              '        }',
+              '    }',
+              '',
+              '    if ($output -match "No package found") {',
+              '        Write-Host "⚠️ $Name [$Id] was not found in the $Source source. Its winget package ID may have changed or been renamed - search https://github.com/microsoft/winget-pkgs for the current ID and update it in this workflow. Skipping $Name; the rest of the workflow continues."',
+              '    } else {',
+              '        Write-Host "⚠️ $Name $verb failed (exit code $exitCode) - see the winget output above for details. Skipping $Name; the rest of the workflow continues."',
+              '    }',
+              '',
+              '    return $false',
+              '}'
+          ) -join "`r`n"
+
+          Set-Content -Path "C:\Windows\Temp\winget-helpers.ps1" -Value $helperLines -Encoding UTF8
+
+          Write-Host "✅ Shared winget helper function written to C:\Windows\Temp\winget-helpers.ps1"
+
+      - name: 🌐 Install Tailscale via winget
+        shell: pwsh
+        run: |
+          . "C:\Windows\Temp\winget-helpers.ps1"
+
+          $ok = Install-WingetPackage -Name "Tailscale" -Id "Tailscale.Tailscale"
+
+          if (-not $ok) {
+              Write-Error "❌ Failed to install Tailscale — this workflow's entire purpose (remote access) depends on Tailscale, so this is fatal rather than skipped."
+              exit 1
+          }
+
+          # Explicit exit 0 rather than letting the script end on
+          # whatever $LASTEXITCODE happened to be left over from a
+          # native call inside Install-WingetPackage — relying on that
+          # ambient state is exactly the bug that caused this
+          # workflow's very first failure (a step whose last real
+          # command left a stray non-zero code that PowerShell only
+          # surfaced once the whole script had already finished).
+          exit 0
+
+      - name: 🔗 Connect to Tailscale Mesh
+        shell: pwsh
+        run: |
+          Write-Host "🔗 Authenticating & joining Tailscale network..."
+
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTHKEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
+
+          $tsIP = $null
+          $retries = 0
+
+          while (-not $tsIP -and $retries -lt 10) {
+              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+              Start-Sleep -Seconds 5
+              $retries++
+          }
+
+          if (-not $tsIP) {
+              Write-Error "❌ Failed to obtain Tailscale IP"
+              exit 1
+          }
+
+          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+          Write-Host "📍 Tailscale IP: $tsIP"
+
+      - name: 🔍 Verify RDP Connectivity
+        shell: pwsh
+        run: |
+          Write-Host "🔍 Testing RDP port 3389 on $env:TAILSCALE_IP..."
+
+          $test = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
+
+          if (-not $test.TcpTestSucceeded) {
+              Write-Error "❌ RDP port is not reachable"
+              exit 1
+          }
+
+          Write-Host "✅ RDP port is open and reachable"
+
+      - name: ☁️ Install Cloudflare WARP via winget
+        shell: pwsh
+        run: |
+          . "C:\Windows\Temp\winget-helpers.ps1"
+
+          $ok = Install-WingetPackage -Name "Cloudflare WARP" -Id "Cloudflare.Warp"
+
+          if (-not $ok) {
+              Write-Error "❌ Failed to install Cloudflare WARP — the 'Connect to Cloudflare WARP' step that follows depends on it, so this is fatal rather than skipped."
+              exit 1
+          }
+
+          exit 0
+
+      - name: ☁️ Connect to Cloudflare WARP (warp-cli)
+        shell: pwsh
+        run: |
+          Write-Host "☁️ Registering and connecting Cloudflare WARP..."
+
+          # ⚠️ This runs AFTER the Tailscale-IP verification step above on
+          # purpose. WARP is a full-tunnel VPN — connecting it can take
+          # over the default route. Doing that before Tailscale is up and
+          # confirmed reachable risks cutting the path this RDP session
+          # depends on. By this point Tailscale is already verified
+          # working, so if WARP does affect routing, the RDP session
+          # itself isn't the thing that breaks first.
+          $warpCli = "$env:ProgramFiles\Cloudflare\Cloudflare WARP\warp-cli.exe"
+
+          if (-not (Test-Path $warpCli)) {
+              Write-Error "❌ warp-cli.exe not found at expected path: $warpCli"
+              exit 1
+          }
+
+          # A fresh WARP install has no device registration yet, and
+          # `warp-cli connect` fails on an unregistered client — it has
+          # to be registered first. `registration new` is the current
+          # documented subcommand (the bare `register` alias still works
+          # on most builds, but this is the form Cloudflare's own docs
+          # use). On a device that's already registered it returns a
+          # non-zero exit code instead of no-op'ing, and that's an
+          # expected, non-fatal outcome here, not a real failure.
+          #
+          # PowerShell 7.4+ defaults $PSNativeCommandUseErrorActionPreference
+          # to $true, which throws a terminating NativeCommandExitException
+          # the moment any native command like warp-cli.exe returns a
+          # non-zero exit code — before this script would even reach an
+          # `if ($LASTEXITCODE -ne 0)` check of its own. Per the PowerShell
+          # team's own documented guidance for commands with meaningful
+          # non-zero exit codes (see PowerShell/PowerShell#20034), that
+          # behavior is disabled here for the scope of this step only, so
+          # $LASTEXITCODE can be inspected manually instead.
+          $PSNativeCommandUseErrorActionPreference = $false
+
+          & $warpCli --accept-tos registration new
+          $registerExitCode = $LASTEXITCODE
+
+          if ($registerExitCode -ne 0) {
+              Write-Host "ℹ️ warp-cli registration returned exit code $registerExitCode (commonly means this device is already registered) — continuing to connect"
+          }
+
+          & $warpCli --accept-tos connect
+          $connectExitCode = $LASTEXITCODE
+
+          if ($connectExitCode -ne 0) {
+              Write-Error "❌ warp-cli connect failed (exit code $connectExitCode)"
+              exit 1
+          }
+
+          $warpStatus = $null
+          $retries = 0
+
+          while ($retries -lt 10) {
+              $warpStatus = & $warpCli --accept-tos status | Out-String
+              if ($warpStatus -match "Connected") {
+                  break
+              }
+              Start-Sleep -Seconds 3
+              $retries++
+          }
+
+          if ($warpStatus -notmatch "Connected") {
+              Write-Error "❌ Cloudflare WARP did not report Connected status after $retries retries: $warpStatus"
+              exit 1
+          }
+
+          Write-Host "✅ Cloudflare WARP connected"
+
+      - name: 💠 Install Telegram via winget as the ATOMA user (Scheduled Task)
+        shell: pwsh
+        run: |
+          # Telegram's winget manifest ships ONLY a user-scoped installer
+          # (confirmed directly against Telegram.TelegramDesktop's own
+          # installer.yaml in microsoft/winget-pkgs — both its x64 and
+          # x86 entries specify "Scope: user", and there is no machine
+          # -scope installer at all; a request to add one is still open:
+          # microsoft/winget-pkgs#338073). A user-scoped install always
+          # lands in the profile of whichever account actually RUNS the
+          # winget command — and every step in this workflow runs as
+          # the GitHub Actions runner's own service account, never as
+          # the ATOMA user this workflow creates with New-LocalUser
+          # earlier. New-LocalUser only creates the account; it never
+          # logs into it or runs anything as it. So a plain
+          # `winget install --id Telegram.TelegramDesktop` here was
+          # installing Telegram into the runner service account's own
+          # profile — a profile ATOMA can never see — which is exactly
+          # the reported symptom: Telegram not appearing for ATOMA.
+          #
+          # Passing --scope user explicitly would NOT fix this either.
+          # Per Microsoft's own guidance on this exact scenario
+          # (learn.microsoft.com/answers/questions/5936525): "If you run
+          # it remotely under SYSTEM [or any other account], the 'user'
+          # scope resolves to [that account's] profile, which is not
+          # what you want... you need to run the winget install command
+          # inside the logged-in user's context."
+          #
+          # A Scheduled Task registered and run AS the ATOMA user is the
+          # standard, documented way to execute a command in a specific
+          # local user's context non-interactively, without that user
+          # ever needing an active logon session — which matters here,
+          # since ATOMA has never logged in on this runner and there is
+          # no interactive desktop session for it to use. This uses
+          # ATOMA's own password (already available as $env:RDP_PASSWORD
+          # from the "Create Administrator User" step earlier) with
+          # Register-ScheduledTask's -User/-Password parameters, which
+          # is the officially documented mechanism for this
+          # (learn.microsoft.com/powershell/module/scheduledtasks/
+          # register-scheduledtask). Start-Process -Credential was
+          # deliberately NOT used here — it has a long-standing, still-
+          # open bug (PowerShell/PowerShell#20040) where it reports
+          # "wrong username or password" even with correct credentials,
+          # specifically in non-interactive/automation contexts like
+          # this one.
+          $PSNativeCommandUseErrorActionPreference = $false
+
+          $taskName = "InstallTelegramForATOMA"
+          $logPath = "C:\Windows\Temp\telegram-install-log.txt"
+
+          # The scheduled task runs winget as ATOMA and writes its own
+          # exit code to a log file, since a scheduled task's own
+          # process exit code isn't directly what LASTEXITCODE would
+          # capture in this step's own PowerShell session — this step
+          # and the task run as two separate processes under two
+          # separate user contexts.
+          #
+          # The commands are written to a standalone .ps1 file rather
+          # than passed inline as a -Command string. An earlier version
+          # of this step tried to build one long inline command string
+          # threaded through TWO layers of shell quoting (cmd.exe, then
+          # powershell.exe -Command), which is a well-documented source
+          # of subtle breakage — per Windows' own argument-parsing docs
+          # (referenced in PHP's escapeshellarg documentation): "If the
+          # executed command contains further indirect calls through
+          # cmd.exe, each child command must be escaped again for each
+          # level of indirection." A bare file path passed to
+          # `-File` needs no escaping at all, which avoids that problem
+          # entirely rather than trying to get multi-layer escaping
+          # exactly right.
+          $telegramScriptPath = "C:\Windows\Temp\install-telegram.ps1"
+          $outputLogPath = "C:\Windows\Temp\telegram-install-output.txt"
+
+          # This inner script can't dot-source the shared
+          # Install-WingetPackage helper from the "Prepare shared winget
+          # helper function" step: it runs later, asynchronously, in a
+          # completely separate process under the ATOMA security
+          # context, and depending on a file another context just wrote
+          # moments earlier is an extra cross-context dependency this
+          # step doesn't need to take on. Instead it captures winget's
+          # own output text directly and checks it for "No package
+          # found", giving the same quality of ID-change diagnostic the
+          # shared helper provides everywhere else, just implemented
+          # locally.
+          $telegramScriptContent = @(
+              '$tgOutput = winget install --id Telegram.TelegramDesktop --source winget --exact --silent --force --accept-package-agreements --accept-source-agreements --disable-interactivity 2>&1 | Out-String',
+              "Set-Content -Path '$logPath' -Value `$LASTEXITCODE",
+              "Set-Content -Path '$outputLogPath' -Value `$tgOutput"
+          ) -join "`r`n"
+
+          Set-Content -Path $telegramScriptPath -Value $telegramScriptContent -Encoding UTF8
+
+          $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$telegramScriptPath`""
+
+          # IMPORTANT: no -Principal / New-ScheduledTaskPrincipal here.
+          # Register-ScheduledTask's own official parameter-set
+          # documentation (learn.microsoft.com/powershell/module/
+          # scheduledtasks/register-scheduledtask) shows "Principal" and
+          # "User" as two SEPARATE, mutually exclusive parameter sets —
+          # -Principal cannot be combined with -User/-Password in the
+          # same call at all. An earlier version of this step did
+          # exactly that, which is almost certainly why the task
+          # registered without error but never actually ran Telegram's
+          # install for ATOMA: multiple documented reports of this
+          # combination (e.g. a Microsoft Q&A/TechNet thread titled
+          # "registering new scheduled task - does not 'run whether
+          # user is logged on or not'") describe a task that LOOKS
+          # correctly registered but silently stays set to "Run only
+          # when user is logged on" — which never fires here, since
+          # ATOMA has no interactive logon session on this runner. The
+          # fix, confirmed against several current, working examples
+          # (including a July 2026 writeup specifically about
+          # diagnosing tasks that register but don't run), is to pass
+          # -User, -Password, and -RunLevel directly to
+          # Register-ScheduledTask with no Principal object at all.
+          #
+          # The username MUST be qualified as "COMPUTERNAME\ATOMA" here —
+          # NOT ".\ATOMA". This isn't a style preference: ".\username"
+          # is specifically broken for password-logon-type
+          # Register-ScheduledTask calls at the underlying Windows API
+          # level. A documented report of this exact failure
+          # (ansible-collections/community.windows#453) confirms why:
+          # with LogonType Password (i.e. whenever -Password is
+          # supplied, as it is here), the ".\username" string is passed
+          # straight through to the Schedule.Service COM object's
+          # RegisterTaskDefinition method, which cannot resolve it to a
+          # SID for that specific logon type — producing exactly
+          # "No mapping between account names and security IDs was
+          # done." The same source notes ".\username" DOES work for
+          # SID-only lookups (e.g. an interactive-token logon type),
+          # which is why it looked like a reasonable, safe choice
+          # before this was tested against a real password-logon task.
+          # The documented, confirmed-working fix is to use the
+          # explicit computer name instead of the "." shorthand.
+          Register-ScheduledTask `
+              -TaskName $taskName `
+              -Action $action `
+              -User "$env:COMPUTERNAME\$env:RDP_USERNAME" `
+              -Password $env:RDP_PASSWORD `
+              -RunLevel Highest `
+              -Force | Out-Null
+
+          if ($LASTEXITCODE -ne 0 -and $null -ne $LASTEXITCODE) {
+              Write-Host "⚠️ Registering the Telegram install task returned exit code $LASTEXITCODE — continuing anyway, since Telegram is not critical to this session, per the same non-fatal handling used elsewhere in this workflow."
+          }
+
+          Write-Host "📥 Starting Telegram install as $env:RDP_USERNAME via Scheduled Task..."
+          Start-ScheduledTask -TaskName $taskName
+
+          # Poll for completion. State goes Running -> Ready once the
+          # task's process has exited (success or failure) — LastTaskResult
+          # alone isn't reliable to distinguish "still running" from
+          # "finished", since it can briefly still read 0 (not-yet-run)
+          # right after triggering, before the task has actually started.
+          $maxWaitSeconds = 180
+          $waited = 0
+          $pollInterval = 5
+
+          while ($waited -lt $maxWaitSeconds) {
+              Start-Sleep -Seconds $pollInterval
+              $waited += $pollInterval
+              $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+
+              if ($null -eq $task) {
+                  Write-Host "⚠️ Scheduled task '$taskName' disappeared unexpectedly while waiting for it to finish — continuing anyway."
+                  break
+              }
+
+              if ($task.State -ne "Running") {
+                  break
+              }
+          }
+
+          $telegramExitCode = $null
+          $telegramOutput = $null
+          if (Test-Path $logPath) {
+              $telegramExitCode = (Get-Content -Path $logPath -Raw).Trim()
+          }
+          if (Test-Path $outputLogPath) {
+              $telegramOutput = Get-Content -Path $outputLogPath -Raw
+          }
+
+          # Clean up the task regardless of outcome, so repeated runs of
+          # this workflow don't accumulate stale scheduled tasks on
+          # whatever runner image caching might otherwise persist them.
+          Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+
+          if ($telegramExitCode -eq "0") {
+              Write-Host "✅ Telegram installed for $env:RDP_USERNAME"
+          } elseif ($telegramOutput -match "No package found") {
+              Write-Host "⚠️ Telegram [Telegram.TelegramDesktop] was not found in the winget source when installing as $env:RDP_USERNAME. Its winget package ID may have changed or been renamed - search https://github.com/microsoft/winget-pkgs for the current ID and update it in this workflow. Skipping Telegram; the rest of the workflow continues."
+          } else {
+              Write-Host "⚠️ Telegram install for $env:RDP_USERNAME did not confirm success (reported exit code: $telegramExitCode, waited ${waited}s) — continuing with the rest of the workflow regardless. This does not fail the job."
+              if ($telegramOutput) { Write-Host $telegramOutput.Trim() }
+          }
+
+          # Explicit exit 0: this step never fails the job regardless of
+          # Telegram's outcome, so it ends deterministically rather than
+          # relying on ambient state, for consistency with every other
+          # step in this workflow.
+          exit 0
+
+      - name: 🧩 Install remaining apps via winget (Google Drive)
+        shell: pwsh
+        run: |
+          . "C:\Windows\Temp\winget-helpers.ps1"
+
+          # Tailscale and Cloudflare WARP already have their own install
+          # + connect steps earlier in this workflow, in that order, as
+          # requested. WhatsApp and Telegram now have their own dedicated
+          # install steps (Telegram specifically needs to run as the
+          # ATOMA user — see that step's comments for why). This step
+          # installs Google Drive, whose manifest is confirmed
+          # machine-scoped (Scope: machine, consistent across multiple
+          # published versions of Google.GoogleDrive in winget-pkgs), so
+          # it installs into Program Files and is visible to every user
+          # on the machine, including ATOMA, with no special handling
+          # needed.
+          #
+          # Gmail has no installable Windows desktop client — it is a
+          # website (mail.google.com), so there is no winget package for
+          # it. Chrome (updated further below) is how it gets used on
+          # this box.
+          #
+          # Non-fatal, like every other optional app in this workflow:
+          # a failure here is logged and the workflow continues.
+          Install-WingetPackage -Name "Google Drive" -Id "Google.GoogleDrive" | Out-Null
+
+          # Explicit exit 0 regardless of the function's return value —
+          # this step never fails the job either way, so it should never
+          # end relying on whatever $LASTEXITCODE happened to be left
+          # over from a native call inside the function.
+          exit 0
+
+      - name: 🔄 Update Google Chrome via winget
+        shell: pwsh
+        run: |
+          . "C:\Windows\Temp\winget-helpers.ps1"
+
+          # Chrome is treated as an optional app here, same as WhatsApp,
+          # Telegram, and Google Drive: it was already installed on this
+          # runner before this workflow's involvement, so a failed
+          # update just leaves it at its current, already-working
+          # version rather than breaking anything — non-fatal, per
+          # "don't stop the workflow over one app".
+          Install-WingetPackage -Name "Google Chrome" -Id "Google.Chrome" -Upgrade | Out-Null
+
+          # Explicit exit 0 regardless of the function's return value —
+          # this step never fails the job either way, so it should never
+          # end relying on whatever $LASTEXITCODE happened to be left
+          # over from a native call inside the function.
+          exit 0
+
+      - name: 💬 Install WhatsApp via winget (Microsoft Store source)
+        id: install_whatsapp
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          . "C:\Windows\Temp\winget-helpers.ps1"
+
+          # WhatsApp installs from the Microsoft Store source
+          # specifically, by its Store product ID (9NKSQGP7F2NH), rather
+          # than from the winget community source. WhatsApp.WhatsApp in
+          # that source was confirmed absent from this runner's index by
+          # an earlier diagnostic search in this workflow's history.
+          #
+          # This step runs LAST, right before Keep Alive, deliberately:
+          # WhatsApp is the one app in this workflow with a real,
+          # documented chance of failing for reasons outside this
+          # workflow's control (see below), so every other, more
+          # load-bearing step — Tailscale, WARP, RDP verification, the
+          # other apps, Chrome — completes first regardless of whether
+          # this one succeeds.
+          #
+          # Non-fatal in two independent, layered ways: the shared
+          # Install-WingetPackage function never throws or exits on its
+          # own (it just returns $false, handled below), AND this step
+          # also carries continue-on-error: true at the GitHub Actions
+          # level as a second safety net, in case something outside the
+          # function's own control were to fail (a PowerShell crash,
+          # for instance). msstore installs have several independent
+          # failure surfaces that don't exist for the plain winget
+          # source and that can't be fully ruled out from outside this
+          # runner: Entra ID / Intune-role authentication requirements
+          # for msstore package licensing (deploymentresearch.com's
+          # writeup on winget 1.8 msstore downloads), region/account-
+          # type/Store-availability gating even when the package is
+          # genuinely published (techyorker.com's winget+msstore
+          # guide), and installs failing specifically under a
+          # service/system execution context with "0x80070520: A
+          # specified logon session does not exist" (call4cloud.nl's
+          # Intune winget deployment writeup) — closer to how a GitHub
+          # Actions runner executes than an interactive user session.
+          #
+          # The function's return value is captured and used to set a
+          # genuine exit code (1 on failure) rather than discarded —
+          # continue-on-error: true is what stops a real failure here
+          # from failing the job, not forcing exit 0 regardless of the
+          # outcome. That distinction matters because the Keep Alive
+          # step later reads steps.install_whatsapp.outcome to decide
+          # what to print in the session summary; forcing exit 0 in
+          # both branches would make that summary always claim success
+          # even when WhatsApp genuinely failed to install.
+          $ok = Install-WingetPackage -Name "WhatsApp" -Id "9NKSQGP7F2NH" -Source "msstore"
+
+          if (-not $ok) {
+              exit 1
+          }
+
+          exit 0
+
+      - name: ⏳ Keep Alive & Display Connection Info
+        shell: pwsh
+        env:
+          # Passed in via env: rather than inlined as a ${{ }} expression
+          # directly inside this step's PowerShell strings below. GitHub
+          # Actions expressions are substituted into the script text
+          # before the shell ever runs it — for a short, fixed-format
+          # value like a workflow input (session_minutes, used further
+          # below) that's fine, but steps.<id>.outcome combined with a
+          # long free-text message containing punctuation is exactly the
+          # pattern GitHub's own security guidance and tooling (e.g.
+          # github/gh-aw's compiler, which now auto-flags this exact
+          # shape) calls out: it's safer and more predictable to let the
+          # runner assign the raw value to an environment variable first,
+          # then branch on it inside the script with full control over
+          # quoting, instead of trusting a long interpolated string to
+          # survive the substitution untouched.
+          WHATSAPP_INSTALL_OUTCOME: ${{ steps.install_whatsapp.outcome }}
+        run: |
+          $minutesInput = "${{ github.event.inputs.session_minutes }}"
+          if ([string]::IsNullOrWhiteSpace($minutesInput)) { $minutesInput = "60" }
+          $minutes = [int]$minutesInput
+
+          if ($minutes -gt 360) {
+              Write-Host "⚠️ session_minutes capped at 335 (job timeout-minutes is 350; this leaves headroom for setup/teardown)"
+              $minutes = 335
+          }
+
+          $endTime = (Get-Date).AddMinutes($minutes)
+
+          if ($env:WHATSAPP_INSTALL_OUTCOME -eq "success") {
+              $whatsappSummary = "installed"
+          } else {
+              $whatsappSummary = "install failed - see the Install WhatsApp step log above; the rest of this session is unaffected"
+          }
+
+          Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          Write-Host "🟢 TEMPORARY RDP SESSION IS READY"
+          Write-Host "👤 Username      : $env:RDP_USERNAME"
+          Write-Host "🌐 Tailscale IP  : $env:TAILSCALE_IP"
+          Write-Host "🔐 Password      : (hidden – see repo secrets)"
+          Write-Host "⏱️  Duration      : $minutes minutes"
+          Write-Host "🌐 Tailscale installed & connected"
+          Write-Host "☁️ Cloudflare WARP installed & connected via warp-cli"
+          Write-Host "📲 Telegram and Google Drive installed via winget"
+          Write-Host "🌍 Google Chrome updated via winget"
+          Write-Host "💬 WhatsApp (msstore): $whatsappSummary"
+          Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+          while ((Get-Date) -lt $endTime) {
+              $remaining = [math]::Ceiling((New-TimeSpan -Start (Get-Date) -End $endTime).TotalMinutes)
+              Write-Host "[$(Get-Date -Format 'HH:mm:ss')] 🟢 Session alive... ($remaining min remaining)"
+              Start-Sleep -Seconds 300
+          }
+
+          Write-Host "⏹️ Session duration reached — job will now end and the runner will be destroyed."
