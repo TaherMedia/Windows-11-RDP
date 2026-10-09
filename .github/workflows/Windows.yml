@@ -7,7 +7,7 @@ on:
       session_minutes:
         description: "Session duration in minutes (maximum 330)"
         required: false
-        default: "300"
+        default: "360"
         type: string
 
 permissions:
@@ -15,7 +15,7 @@ permissions:
 
 jobs:
   secure-rdp:
-    runs-on: windows-2025
+    runs-on: windows-latest
     timeout-minutes: 360
 
     env:
