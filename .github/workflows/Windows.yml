@@ -1,189 +1,801 @@
-name: 🪟 Windows 2025 Server TEMP RDP
+
+name: "🪟 Windows 2025 Server TEMP RDP"
 
 on:
   workflow_dispatch:
     inputs:
       session_minutes:
-        description: "How long to keep the session alive (minutes)"
+        description: "Session duration in minutes (maximum 330)"
         required: false
-        default: "360"
+        default: "300"
+        type: string
+
+permissions:
+  contents: read
 
 jobs:
   secure-rdp:
-    runs-on: windows-latest
+    runs-on: windows-2025
     timeout-minutes: 360
 
     env:
       RDP_USERNAME: ATOMA
-      RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}   # 🔐 Pulled from GitHub Secrets
+      RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
+      TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
+      SESSION_MINUTES: ${{ inputs.session_minutes }}
 
     steps:
-      - name: 🖥️ Enable Remote Desktop
+      # ==========================================================
+      # 1. Validate secrets
+      # ==========================================================
+      - name: "🔐 Validate required secrets"
         shell: pwsh
         run: |
-          Write-Host "🖥️ Enabling Remote Desktop Services..."
+          $ErrorActionPreference = "Stop"
 
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
-            -Name 'fDenyTSConnections' -Value 0 -Force
-
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-            -Name 'UserAuthentication' -Value 0 -Force
-
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-            -Name 'SecurityLayer' -Value 0 -Force
-
-          netsh advfirewall firewall delete rule name="RDP-Tailscale" | Out-Null
-          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389 | Out-Null
-
-          Restart-Service -Name TermService -Force
-          Write-Host "✅ RDP service restarted & firewall rule added"
-
-      - name: 👤 Create Administrator User
-        shell: pwsh
-        run: |
-          Write-Host "👤 Setting up user: $env:RDP_USERNAME"
-
-          $securePass = ConvertTo-SecureString $env:RDP_PASSWORD -AsPlainText -Force
-
-          if (-not (Get-LocalUser -Name $env:RDP_USERNAME -ErrorAction SilentlyContinue)) {
-              New-LocalUser -Name $env:RDP_USERNAME -Password $securePass -AccountNeverExpires
-              Write-Host "✅ User created successfully"
-          } else {
-              Write-Host "ℹ️ User already exists – reusing"
+          if ([string]::IsNullOrWhiteSpace($env:RDP_PASSWORD)) {
+              throw "Missing secret: RDP_PASSWORD"
           }
 
-          Add-LocalGroupMember -Group "Administrators" -Member $env:RDP_USERNAME -ErrorAction SilentlyContinue
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $env:RDP_USERNAME -ErrorAction SilentlyContinue
-          Write-Host "🔑 User granted Administrator & Remote Desktop rights"
+          if ([string]::IsNullOrWhiteSpace($env:TAILSCALE_AUTHKEY)) {
+              throw "Missing secret: TAILSCALE_AUTHKEY"
+          }
 
-      - name: 🌐 Install Tailscale VPN
+          Write-Host "Required secrets are configured."
+
+      # ==========================================================
+      # 2. Configure secure RDP
+      # ==========================================================
+      - name: "🖥️ Enable secure Remote Desktop"
         shell: pwsh
         run: |
-          Write-Host "🌐 Downloading Tailscale..."
+          $ErrorActionPreference = "Stop"
 
-          # Pinned version checked against Tailscale's own stable package
-          # index at time of writing — still current on the Windows/MSI
-          # track, not stale (macOS Homebrew was one patch ahead, which is
-          # normal cross-channel lag, not a sign this URL is out of date).
-          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.102.4-amd64.msi"
-          $installerPath = "$env:TEMP\tailscale.msi"
+          Set-ItemProperty `
+            -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+            -Name 'fDenyTSConnections' `
+            -Value 0
 
-          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
-          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
-          Remove-Item $installerPath -Force
+          # Keep Network Level Authentication enabled.
+          Set-ItemProperty `
+            -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+            -Name 'UserAuthentication' `
+            -Value 1
 
-          Write-Host "✅ Tailscale installed"
+          # Use TLS for RDP.
+          Set-ItemProperty `
+            -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+            -Name 'SecurityLayer' `
+            -Value 2
 
-      - name: 🔗 Connect to Tailscale Mesh
+          Get-NetFirewallRule `
+            -DisplayGroup "Remote Desktop" `
+            -ErrorAction SilentlyContinue |
+            Disable-NetFirewallRule
+
+          Get-NetFirewallRule `
+            -Name "RDP-Tailscale-Only" `
+            -ErrorAction SilentlyContinue |
+            Remove-NetFirewallRule
+
+          New-NetFirewallRule `
+            -Name "RDP-Tailscale-Only" `
+            -DisplayName "RDP - Tailscale network only" `
+            -Direction Inbound `
+            -Action Allow `
+            -Protocol TCP `
+            -LocalPort 3389 `
+            -RemoteAddress "100.64.0.0/10" `
+            -Profile Any
+
+          Set-Service -Name TermService -StartupType Automatic
+          Restart-Service -Name TermService -Force
+
+          Write-Host "RDP is configured with NLA, TLS and a Tailscale-only firewall rule."
+
+      # ==========================================================
+      # 3. Create the ATOMA administrator account
+      # ==========================================================
+      - name: "👤 Create or update ATOMA"
         shell: pwsh
         run: |
-          Write-Host "🔗 Authenticating & joining Tailscale network..."
+          $ErrorActionPreference = "Stop"
 
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTHKEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
+          $securePass = ConvertTo-SecureString `
+            $env:RDP_PASSWORD -AsPlainText -Force
+
+          $user = Get-LocalUser `
+            -Name $env:RDP_USERNAME `
+            -ErrorAction SilentlyContinue
+
+          if ($null -eq $user) {
+              New-LocalUser `
+                -Name $env:RDP_USERNAME `
+                -Password $securePass `
+                -Description "Temporary RDP administrator" `
+                -AccountNeverExpires `
+                -PasswordNeverExpires
+          } else {
+              Set-LocalUser `
+                -Name $env:RDP_USERNAME `
+                -Password $securePass `
+                -PasswordNeverExpires $true
+          }
+
+          foreach ($group in @("Administrators", "Remote Desktop Users")) {
+              $members = Get-LocalGroupMember `
+                -Group $group `
+                -ErrorAction Stop
+
+              $alreadyMember = $members | Where-Object {
+                  $_.Name -eq "$env:COMPUTERNAME\$env:RDP_USERNAME"
+              }
+
+              if (-not $alreadyMember) {
+                  Add-LocalGroupMember `
+                    -Group $group `
+                    -Member $env:RDP_USERNAME
+              }
+          }
+
+          Write-Host "ATOMA is configured."
+
+      # ==========================================================
+      # 4. Install Tailscale machine-wide using WinGet
+      # ==========================================================
+      - name: "🌐 Install Tailscale with WinGet"
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          winget install `
+            --id Tailscale.Tailscale `
+            --exact `
+            --source winget `
+            --scope machine `
+            --silent `
+            --accept-source-agreements `
+            --accept-package-agreements `
+            --disable-interactivity
+
+          if ($LASTEXITCODE -ne 0) {
+              throw "Tailscale installation failed: $LASTEXITCODE"
+          }
+
+          $tailscaleExe = Join-Path `
+            $env:ProgramFiles "Tailscale\tailscale.exe"
+
+          if (-not (Test-Path $tailscaleExe)) {
+              throw "Tailscale executable not found."
+          }
+
+          & $tailscaleExe version
+
+      # ==========================================================
+      # 5. Connect Tailscale
+      # ==========================================================
+      - name: "🔗 Connect to Tailscale"
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $tailscaleExe = Join-Path `
+            $env:ProgramFiles "Tailscale\tailscale.exe"
+
+          $service = Get-Service -Name Tailscale -ErrorAction Stop
+
+          if ($service.Status -ne "Running") {
+              Start-Service -Name Tailscale
+              $service.WaitForStatus(
+                "Running",
+                [TimeSpan]::FromSeconds(30)
+              )
+          }
+
+          & $tailscaleExe up `
+            "--authkey=$($env:TAILSCALE_AUTHKEY)" `
+            "--hostname=gh-runner-$($env:GITHUB_RUN_ID)" `
+            --unattended
+
+          if ($LASTEXITCODE -ne 0) {
+              throw "Tailscale authentication or connection failed."
+          }
 
           $tsIP = $null
-          $retries = 0
 
-          while (-not $tsIP -and $retries -lt 10) {
-              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
-              Start-Sleep -Seconds 5
-              $retries++
+          for ($i = 0; $i -lt 30; $i++) {
+              $candidate = & $tailscaleExe ip -4 2>$null |
+                Select-Object -First 1
+
+              if ($candidate -match '^\d{1,3}(\.\d{1,3}){3}$') {
+                  $tsIP = $candidate.Trim()
+                  break
+              }
+
+              Start-Sleep -Seconds 2
           }
 
           if (-not $tsIP) {
-              Write-Error "❌ Failed to obtain Tailscale IP"
-              exit 1
+              throw "Could not obtain the Tailscale IPv4 address."
           }
 
-          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
-          Write-Host "📍 Tailscale IP: $tsIP"
+          Add-Content -Path $env:GITHUB_ENV `
+            -Value "TAILSCALE_IP=$tsIP"
 
-      - name: 🔍 Verify RDP Connectivity
+          Write-Host "Tailscale IPv4: $tsIP"
+
+          & $tailscaleExe status
+
+      # ==========================================================
+      # 6. Verify RDP
+      # ==========================================================
+      - name: "🔍 Verify RDP connectivity"
         shell: pwsh
         run: |
-          Write-Host "🔍 Testing RDP port 3389 on $env:TAILSCALE_IP..."
+          $ErrorActionPreference = "Stop"
 
-          $test = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
+          $result = Test-NetConnection `
+            -ComputerName $env:TAILSCALE_IP `
+            -Port 3389 `
+            -WarningAction SilentlyContinue
 
-          if (-not $test.TcpTestSucceeded) {
-              Write-Error "❌ RDP port is not reachable"
-              exit 1
+          if (-not $result.TcpTestSucceeded) {
+              throw "RDP is not reachable through Tailscale."
           }
 
-          Write-Host "✅ RDP port is open and reachable"
+          Write-Host "RDP connectivity verified."
 
-      - name: 📲 Install Telegram Desktop (latest)
+      # ==========================================================
+      # 7. Install Cloudflare WARP machine-wide
+      # ==========================================================
+      - name: "☁️ Install Cloudflare WARP with WinGet"
         shell: pwsh
         run: |
-          Write-Host "📲 Downloading latest Telegram Desktop..."
+          $ErrorActionPreference = "Stop"
 
-          # telegram.org's own redirect always serves the current release —
-          # no version number to go stale, same pattern as the Tailscale step.
-          $tgUrl = "https://telegram.org/dl/desktop/win64"
-          $tgInstaller = "$env:TEMP\tsetup.exe"
+          winget install `
+            --id Cloudflare.Warp `
+            --exact `
+            --source winget `
+            --scope machine `
+            --silent `
+            --accept-source-agreements `
+            --accept-package-agreements `
+            --disable-interactivity
 
-          Invoke-WebRequest -Uri $tgUrl -OutFile $tgInstaller
-
-          Write-Host "📲 Installing Telegram Desktop silently..."
-          # Telegram's installer is Inno Setup based; these are its documented
-          # unattended flags (verified current as of mid-2026 guides).
-          Start-Process -FilePath $tgInstaller -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART" -Wait
-
-          Remove-Item $tgInstaller -Force
-          Write-Host "✅ Telegram Desktop installed"
-
-      - name: ☁️ Install Cloudflare WARP (1.1.1.1)
-        shell: pwsh
-        run: |
-          Write-Host "☁️ Downloading latest Cloudflare WARP..."
-
-          # Cloudflare's own release CDN — no version number in the path,
-          # always serves the current build.
-          $warpUrl = "https://1111-releases.cloudflareclient.com/windows/Cloudflare_WARP_Release-x64.msi"
-          $warpInstaller = "$env:TEMP\warp.msi"
-
-          Invoke-WebRequest -Uri $warpUrl -OutFile $warpInstaller
-
-          Write-Host "☁️ Installing Cloudflare WARP silently..."
-          Start-Process msiexec.exe -ArgumentList "/i", "`"$warpInstaller`"", "/quiet", "/norestart" -Wait
-
-          Remove-Item $warpInstaller -Force
-
-          # ⚠️ Deliberately installed but NOT auto-connected. WARP is a
-          # full-tunnel VPN — if it auto-connects it can take over the
-          # default route and cut the Tailscale path this RDP session is
-          # running over, locking you out mid-session. Toggle it on
-          # manually from inside the desktop once you're already connected,
-          # so if it does affect routing, you're there to see it happen.
-          Write-Host "✅ Cloudflare WARP installed (left disconnected on purpose — see comment above)"
-
-      - name: ⏳ Keep Alive & Display Connection Info
-        shell: pwsh
-        run: |
-          $minutesInput = "${{ github.event.inputs.session_minutes }}"
-          if ([string]::IsNullOrWhiteSpace($minutesInput)) { $minutesInput = "60" }
-          $minutes = [int]$minutesInput
-
-          if ($minutes -gt 360) {
-              Write-Host "⚠️ session_minutes capped at 335 (job timeout-minutes is 350; this leaves headroom for setup/teardown)"
-              $minutes = 335
+          if ($LASTEXITCODE -ne 0) {
+              throw "Cloudflare WARP installation failed: $LASTEXITCODE"
           }
+
+          $warpDir = Join-Path `
+            $env:ProgramFiles "Cloudflare\Cloudflare WARP"
+
+          $warpCli = Join-Path $warpDir "warp-cli.exe"
+
+          if (-not (Test-Path $warpCli)) {
+              throw "WARP CLI was not found after installation."
+          }
+
+          Write-Host "Cloudflare WARP installed machine-wide."
+
+      # ==========================================================
+      # 8. Connect WARP and preserve RDP connectivity
+      # ==========================================================
+      - name: "🔒 Connect Cloudflare WARP"
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $warpCli = Join-Path `
+            $env:ProgramFiles "Cloudflare\Cloudflare WARP\warp-cli.exe"
+
+          $warpConnected = $false
+
+          try {
+              # If already registered, registration new may fail.
+              # Attempt the connection regardless.
+              & $warpCli registration new
+
+              & $warpCli connect
+
+              if ($LASTEXITCODE -ne 0) {
+                  throw "WARP connection command failed."
+              }
+
+              for ($i = 0; $i -lt 12; $i++) {
+                  Start-Sleep -Seconds 5
+
+                  $trace = & curl.exe `
+                    --silent `
+                    --max-time 10 `
+                    "https://www.cloudflare.com/cdn-cgi/trace" `
+                    2>$null
+
+                  if ($trace -match '(?m)^warp=on$') {
+                      $warpConnected = $true
+                      break
+                  }
+              }
+
+              if (-not $warpConnected) {
+                  throw "Could not verify an active WARP tunnel."
+              }
+          } catch {
+              Write-Warning "Automatic WARP activation failed: $($_.Exception.Message)"
+
+              Add-Content -Path $env:GITHUB_ENV `
+                -Value "WARP_STATE=MANUAL_SETUP_REQUIRED"
+
+              Write-Host "WARP is installed. Manual first-run configuration may be required."
+          }
+
+          if ($warpConnected) {
+              Add-Content -Path $env:GITHUB_ENV `
+                -Value "WARP_STATE=CONNECTED"
+
+              Start-Sleep -Seconds 5
+
+              $rdp = Test-NetConnection `
+                -ComputerName $env:TAILSCALE_IP `
+                -Port 3389 `
+                -WarningAction SilentlyContinue
+
+              if (-not $rdp.TcpTestSucceeded) {
+                  Write-Warning "WARP affected RDP connectivity; disconnecting WARP."
+
+                  & $warpCli disconnect
+
+                  if ($LASTEXITCODE -ne 0) {
+                      throw "Could not disconnect WARP to preserve RDP connectivity."
+                  }
+
+                  Add-Content -Path $env:GITHUB_ENV `
+                    -Value "WARP_STATE=DISCONNECTED_TO_PRESERVE_RDP"
+
+                  Start-Sleep -Seconds 10
+
+                  $rdp = Test-NetConnection `
+                    -ComputerName $env:TAILSCALE_IP `
+                    -Port 3389 `
+                    -WarningAction SilentlyContinue
+
+                  if (-not $rdp.TcpTestSucceeded) {
+                      throw "RDP connectivity did not recover after disconnecting WARP."
+                  }
+              }
+
+              Write-Host "WARP state: $env:WARP_STATE"
+          }
+
+      # ==========================================================
+      # 9. Prepare the actual ATOMA user profile
+      #    This is the main fix for Telegram and WhatsApp.
+      # ==========================================================
+      - name: "👤 Configure app installation for ATOMA"
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $root = Join-Path $env:ProgramData "ATOMA-AppSetup"
+          New-Item -ItemType Directory -Path $root -Force | Out-Null
+
+          $scriptPath = Join-Path $root "Install-Apps-As-ATOMA.ps1"
+          $taskName = "ATOMA-FirstLogon-AppSetup"
+          $account = "$($env:COMPUTERNAME)\$($env:RDP_USERNAME)"
+
+          $setupScript = @'
+          $ErrorActionPreference = "Stop"
+
+          $root = Join-Path $env:ProgramData "ATOMA-AppSetup"
+          $logPath = Join-Path $root "install.log"
+          $statusPath = Join-Path $root "status.txt"
+          $successPath = Join-Path $root "success.flag"
+
+          New-Item -ItemType Directory -Path $root -Force | Out-Null
+
+          try {
+              Start-Transcript -Path $logPath -Append | Out-Null
+          } catch {
+              # Continue even if transcript initialization fails.
+          }
+
+          try {
+              if (Test-Path $successPath) {
+                  Write-Host "ATOMA app setup already completed."
+                  return
+              }
+
+              Set-Content -Path $statusPath -Value "RUNNING: Preparing ATOMA apps"
+
+              Write-Host "=========================================="
+              Write-Host "Installing applications in the ATOMA user session"
+              Write-Host "Windows identity: $([System.Security.Principal.WindowsIdentity]::GetCurrent().Name)"
+              Write-Host "=========================================="
+
+              # Register WinGet/App Installer for this user.
+              # Microsoft documents this registration command for
+              # accounts where winget is not yet available.
+              $script:wingetPath = $null
+
+              for ($attempt = 0; $attempt -lt 24; $attempt++) {
+                  try {
+                      Add-AppxPackage `
+                        -RegisterByFamilyName `
+                        -MainPackage "Microsoft.DesktopAppInstaller_8wekyb3d8bbwe" `
+                        -ErrorAction Stop
+                  } catch {
+                      Write-Host "App Installer registration attempt $($attempt + 1): $($_.Exception.Message)"
+                  }
+
+                  $candidate = Join-Path `
+                    $env:LOCALAPPDATA "Microsoft\WindowsApps\winget.exe"
+
+                  if (Test-Path $candidate) {
+                      $null = & $candidate --version 2>&1
+
+                      if ($LASTEXITCODE -eq 0) {
+                          $script:wingetPath = $candidate
+                          break
+                      }
+                  }
+
+                  $cmd = Get-Command winget.exe -ErrorAction SilentlyContinue
+
+                  if ($cmd) {
+                      $script:wingetPath = $cmd.Source
+                      break
+                  }
+
+                  Start-Sleep -Seconds 5
+              }
+
+              if (-not $script:wingetPath) {
+                  throw "WinGet is unavailable in ATOMA. See Microsoft's App Installer registration instructions."
+              }
+
+              Write-Host "WinGet path for ATOMA: $script:wingetPath"
+              & $script:wingetPath --version
+
+              $script:failedPackages = @()
+
+              function Invoke-WingetChecked {
+                  param(
+                      [string]$Label,
+                      [string[]]$Arguments,
+                      [string]$ExpectedNoChangeRegex = ""
+                  )
+
+                  Write-Host ""
+                  Write-Host "Installing/updating: $Label"
+
+                  $output = & $script:wingetPath @Arguments 2>&1
+                  $exitCode = $LASTEXITCODE
+                  $text = ($output | Out-String)
+
+                  Write-Host $text
+
+                  if ($exitCode -eq 0) {
+                      Write-Host "$Label completed."
+                      return $true
+                  }
+
+                  if (
+                      $ExpectedNoChangeRegex -and
+                      $text -match $ExpectedNoChangeRegex
+                  ) {
+                      Write-Host "$Label does not need an update."
+                      return $true
+                  }
+
+                  Write-Warning "$Label failed with WinGet exit code $exitCode."
+                  $script:failedPackages += "$Label (exit code $exitCode)"
+                  return $false
+              }
+
+              # Telegram is explicitly installed for the logged-in user.
+              Invoke-WingetChecked `
+                -Label "Telegram Desktop for ATOMA" `
+                -Arguments @(
+                  "install",
+                  "--id", "Telegram.TelegramDesktop",
+                  "--exact",
+                  "--source", "winget",
+                  "--scope", "user",
+                  "--silent",
+                  "--accept-source-agreements",
+                  "--accept-package-agreements",
+                  "--disable-interactivity"
+                )
+
+              # Run this command as ATOMA so user-scoped packages are
+              # registered to ATOMA, not to the original runner user.
+              # Leave scope unspecified because the WhatsApp manifest
+              # can determine the appropriate installer scope.
+              Invoke-WingetChecked `
+                -Label "WhatsApp for ATOMA" `
+                -Arguments @(
+                  "install",
+                  "--id", "WhatsApp.WhatsApp",
+                  "--exact",
+                  "--source", "winget",
+                  "--silent",
+                  "--accept-source-agreements",
+                  "--accept-package-agreements",
+                  "--disable-interactivity"
+                )
+
+              # Tailscale and WARP were installed machine-wide earlier.
+              # Chrome is also managed at machine scope so that ATOMA
+              # uses the updated installation.
+              $chromePaths = @(
+                  (Join-Path $env:ProgramFiles "Google\Chrome\Application\chrome.exe"),
+                  (Join-Path ${env:ProgramFiles(x86)} "Google\Chrome\Application\chrome.exe")
+              )
+
+              $chromeExe = $chromePaths |
+                  Where-Object { Test-Path $_ } |
+                  Select-Object -First 1
+
+              if ($chromeExe) {
+                  Invoke-WingetChecked `
+                    -Label "Google Chrome update" `
+                    -Arguments @(
+                      "upgrade",
+                      "--id", "Google.Chrome",
+                      "--exact",
+                      "--source", "winget",
+                      "--scope", "machine",
+                      "--silent",
+                      "--accept-source-agreements",
+                      "--accept-package-agreements",
+                      "--disable-interactivity"
+                    ) `
+                    -ExpectedNoChangeRegex '(?i)No applicable upgrade found|No available upgrade found'
+              } else {
+                  Invoke-WingetChecked `
+                    -Label "Google Chrome installation" `
+                    -Arguments @(
+                      "install",
+                      "--id", "Google.Chrome",
+                      "--exact",
+                      "--source", "winget",
+                      "--scope", "machine",
+                      "--silent",
+                      "--accept-source-agreements",
+                      "--accept-package-agreements",
+                      "--disable-interactivity"
+                    )
+              }
+
+              # Create convenient shortcuts on ATOMA's own desktop.
+              $desktop = Join-Path $env:USERPROFILE "Desktop"
+              New-Item -ItemType Directory -Path $desktop -Force | Out-Null
+
+              $shell = New-Object -ComObject WScript.Shell
+
+              function New-DesktopShortcut {
+                  param(
+                      [string]$Name,
+                      [string]$Target,
+                      [string]$Arguments = ""
+                  )
+
+                  if (-not (Test-Path $Target)) {
+                      Write-Host "Shortcut target not found: $Target"
+                      return
+                  }
+
+                  $path = Join-Path $desktop "$Name.lnk"
+                  $shortcut = $shell.CreateShortcut($path)
+                  $shortcut.TargetPath = $Target
+
+                  if ($Arguments) {
+                      $shortcut.Arguments = $Arguments
+                  }
+
+                  $shortcut.WorkingDirectory = Split-Path $Target -Parent
+                  $shortcut.Save()
+
+                  Write-Host "Created desktop shortcut: $Name"
+              }
+
+              # Locate the per-user Telegram executable.
+              $telegramCandidates = @(
+                  (Join-Path $env:APPDATA "Telegram Desktop\Telegram.exe"),
+                  (Join-Path $env:LOCALAPPDATA "Programs\Telegram Desktop\Telegram.exe"),
+                  (Join-Path $env:LOCALAPPDATA "Telegram Desktop\Telegram.exe")
+              )
+
+              $telegramExe = $telegramCandidates |
+                  Where-Object { Test-Path $_ } |
+                  Select-Object -First 1
+
+              if ($telegramExe) {
+                  New-DesktopShortcut `
+                    -Name "Telegram Desktop" `
+                    -Target $telegramExe
+              }
+
+              # Packaged WhatsApp apps are launched via AppsFolder.
+              Start-Sleep -Seconds 3
+
+              $whatsappApp = Get-StartApps |
+                  Where-Object { $_.Name -match "WhatsApp" } |
+                  Select-Object -First 1
+
+              if ($whatsappApp) {
+                  $explorer = Join-Path $env:WINDIR "explorer.exe"
+
+                  $shortcutPath = Join-Path $desktop "WhatsApp.lnk"
+                  $shortcut = $shell.CreateShortcut($shortcutPath)
+                  $shortcut.TargetPath = $explorer
+                  $shortcut.Arguments = "shell:AppsFolder\$($whatsappApp.AppID)"
+                  $shortcut.Save()
+
+                  Write-Host "Created WhatsApp desktop shortcut."
+              } else {
+                  Write-Host "WhatsApp Start Menu entry was not found; check the setup log."
+              }
+
+              $chromePaths = @(
+                  (Join-Path $env:ProgramFiles "Google\Chrome\Application\chrome.exe"),
+                  (Join-Path ${env:ProgramFiles(x86)} "Google\Chrome\Application\chrome.exe")
+              )
+
+              $chromeExe = $chromePaths |
+                  Where-Object { Test-Path $_ } |
+                  Select-Object -First 1
+
+              if ($chromeExe) {
+                  New-DesktopShortcut `
+                    -Name "Google Chrome" `
+                    -Target $chromeExe
+              }
+
+              # Add direct shortcuts to the machine-installed VPN clients.
+              $tailscaleGui = Join-Path $env:ProgramFiles "Tailscale\ipn.exe"
+
+              if (Test-Path $tailscaleGui) {
+                  New-DesktopShortcut `
+                    -Name "Tailscale" `
+                    -Target $tailscaleGui
+              }
+
+              $warpGui = Join-Path `
+                $env:ProgramFiles "Cloudflare\Cloudflare WARP\Cloudflare WARP.exe"
+
+              if (Test-Path $warpGui) {
+                  New-DesktopShortcut `
+                    -Name "Cloudflare WARP" `
+                    -Target $warpGui
+              }
+
+              if ($script:failedPackages.Count -gt 0) {
+                  $failureText = $script:failedPackages -join "; "
+
+                  Set-Content -Path $statusPath `
+                    -Value "FAILED: $failureText"
+
+                  throw "One or more packages failed: $failureText"
+              }
+
+              Set-Content -Path $successPath `
+                -Value "Completed at $(Get-Date -Format o)"
+
+              Set-Content -Path $statusPath `
+                -Value "SUCCESS: ATOMA apps installed and shortcuts created"
+
+              Write-Host ""
+              Write-Host "ATOMA app setup completed successfully."
+              Write-Host "Log: $logPath"
+          } catch {
+              $message = "FAILED: $($_.Exception.Message)"
+              Set-Content -Path $statusPath -Value $message
+              Write-Error $message
+              throw
+          } finally {
+              try {
+                  Stop-Transcript | Out-Null
+              } catch {
+                  # Transcript may not have started.
+              }
+          }
+          '@
+
+          Set-Content `
+            -LiteralPath $scriptPath `
+            -Value $setupScript `
+            -Encoding UTF8
+
+          # Start the installer in ATOMA's actual interactive session.
+          # The task runs only after ATOMA logs in over RDP.
+          $action = New-ScheduledTaskAction `
+            -Execute "powershell.exe" `
+            -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`""
+
+          $trigger = New-ScheduledTaskTrigger `
+            -AtLogOn `
+            -User $account
+
+          $principal = New-ScheduledTaskPrincipal `
+            -UserId $account `
+            -LogonType Interactive `
+            -RunLevel Highest
+
+          $settings = New-ScheduledTaskSettingsSet `
+            -StartWhenAvailable `
+            -MultipleInstances IgnoreNew `
+            -ExecutionTimeLimit (New-TimeSpan -Minutes 45)
+
+          Register-ScheduledTask `
+            -TaskName $taskName `
+            -Action $action `
+            -Trigger $trigger `
+            -Principal $principal `
+            -Settings $settings `
+            -Force | Out-Null
+
+          $statusPath = Join-Path $root "status.txt"
+
+          Set-Content -Path $statusPath `
+            -Value "PENDING: Sign in to Windows as ATOMA to install user apps."
+
+          Write-Host "ATOMA app setup task registered."
+          Write-Host "Task name: $taskName"
+          Write-Host "Apps will be installed at the first ATOMA login."
+          Write-Host "Log path: $root\install.log"
+          Write-Host "Status path: $statusPath"
+
+      # ==========================================================
+      # 10. Keep the temporary session alive
+      # ==========================================================
+      - name: "⏳ Display RDP details and keep alive"
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          [int]$minutes = 300
+
+          if (-not [int]::TryParse($env:SESSION_MINUTES, [ref]$minutes)) {
+              $minutes = 300
+          }
+
+          $minutes = [math]::Max(1, [math]::Min(330, $minutes))
 
           $endTime = (Get-Date).AddMinutes($minutes)
+          $statusPath = Join-Path `
+            $env:ProgramData "ATOMA-AppSetup\status.txt"
 
-          Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          Write-Host "🟢 TEMPORARY RDP SESSION IS READY"
-          Write-Host "👤 Username      : $env:RDP_USERNAME"
-          Write-Host "🌐 Tailscale IP  : $env:TAILSCALE_IP"
-          Write-Host "🔐 Password      : (hidden – see repo secrets)"
-          Write-Host "⏱️  Duration      : $minutes minutes"
-          Write-Host "📲 Telegram Desktop installed | ☁️ Cloudflare WARP installed (off)"
-          Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          Write-Host "========================================"
+          Write-Host "TEMPORARY RDP SESSION READY"
+          Write-Host "Username       : $env:RDP_USERNAME"
+          Write-Host "Tailscale IPv4 : $env:TAILSCALE_IP"
+          Write-Host "Password       : Hidden; use GitHub Secrets"
+          Write-Host "Duration       : $minutes minutes"
+          Write-Host "WARP status    : $env:WARP_STATE"
+          Write-Host "========================================"
+          Write-Host "Log in as ATOMA to start the per-user app setup."
+          Write-Host "Apps log: C:\ProgramData\ATOMA-AppSetup\install.log"
+
+          $lastStatus = $null
 
           while ((Get-Date) -lt $endTime) {
-              $remaining = [math]::Ceiling((New-TimeSpan -Start (Get-Date) -End $endTime).TotalMinutes)
-              Write-Host "[$(Get-Date -Format 'HH:mm:ss')] 🟢 Session alive... ($remaining min remaining)"
-              Start-Sleep -Seconds 300
+              if (Test-Path $statusPath) {
+                  $currentStatus = Get-Content $statusPath -Raw
+
+                  if ($currentStatus -ne $lastStatus) {
+                      Write-Host "ATOMA app status: $currentStatus"
+                      $lastStatus = $currentStatus
+                  }
+              }
+
+              $remaining = [math]::Ceiling(
+                ($endTime - (Get-Date)).TotalMinutes
+              )
+
+              Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Session active; $remaining minutes remaining."
+
+              Start-Sleep -Seconds 60
           }
 
-          Write-Host "⏹️ Session duration reached — job will now end and the runner will be destroyed."
+          Write-Host "Session duration reached. The runner will be destroyed."
