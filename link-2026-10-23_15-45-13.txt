@@ -1,0 +1,49 @@
+════════════════════════════════════════════
+  📎 Snow Cell Bot — Mini App Links Export   
+════════════════════════════════════════════
+Generated : 2026-10-23 15:45:13
+Bot link  : https://t.me/verdanto_resort_bot?startapp=ref_CEWu1y80EP2waPbT
+Accounts  : 7
+════════════════════════════════════════════
+
+Account 1:
+  Id:    8311345414
+  Name:  Nathan Lox
+  Phone: +601125202357
+  Link:  https://resort-investment-telegram-mini-app.replit.app/?tgWebAppStartParam=ref_CEWu1y80EP2waPbT#tgWebAppData=user%3D%257B%2522id%2522%253A8311345414%252C%2522first_name%2522%253A%2522Nathan%2522%252C%2522last_name%2522%253A%2522Lox%2522%252C%2522username%2522%253A%2522NathanLox%2522%252C%2522language_code%2522%253A%2522en%2522%252C%2522photo_url%2522%253A%2522https%253A%255C%252F%255C%252Ft.me%255C%252Fi%255C%252Fuserpic%255C%252F320%255C%252FQsy3WRkwna6V0lq_j52R8SLn2_yI8xr763z7FwFocY_vZh1S0779p6S6m2IXYIYA.svg%2522%257D%26chat_instance%3D706454843848606350%26chat_type%3Dsender%26start_param%3Dref_CEWu1y80EP2waPbT%26auth_date%3D1792784658%26signature%3D_Y9MrR3CZRLYfuD8grUZ0heBWxA7X9khrmd3RYKl84aQ4OfVTa2mY1S-bLQJ5s771FL7Htp9vbmLzZFQdL8dCA%26hash%3Daa00f788293c8c24c08d88fe562a91c3c9db6af8c0d494505c43edf7430f3ba1&tgWebAppVersion=9.6&tgWebAppPlatform=android&tgWebAppDefaultColors=%7B%22bg_color%22%3A%22%23000000%22%2C%22bg_dark_color%22%3A%22%23000000%22%2C%22header_color%22%3A%22%23ffffff%22%2C%22header_dark_color%22%3A%22%23ffffff%22%7D
+
+Account 2:
+  Id:    8993805080
+  Name:  Aiden Lim
+  Phone: +601125600567
+  Link:  https://resort-investment-telegram-mini-app.replit.app/?tgWebAppStartParam=ref_CEWu1y80EP2waPbT#tgWebAppData=user%3D%257B%2522id%2522%253A8993805080%252C%2522first_name%2522%253A%2522Aiden%2522%252C%2522last_name%2522%253A%2522Lim%2522%252C%2522username%2522%253A%2522AidenLim%2522%252C%2522language_code%2522%253A%2522en%2522%252C%2522photo_url%2522%253A%2522https%253A%255C%252F%255C%252Ft.me%255C%252Fi%255C%252Fuserpic%255C%252F320%255C%252Fbdmvgidpr_A96mxeCLI5LQ3pPgNtiXU5gRj_-OHqEpDqXk5IbODdn5nABlKwL0GR.svg%2522%257D%26chat_instance%3D-1463572064889428954%26chat_type%3Dsender%26start_param%3Dref_CEWu1y80EP2waPbT%26auth_date%3D1792784668%26signature%3DxYphNQYGr_QoLvV7Yy6WHh9Eihf15UiIFDPoUJ7Uiw9VZj9D4t-hwGDGiqnIV4OjVLje5wTp3bo5tl_zBGsCCQ%26hash%3D00669ff24cbd20e3d0a2056fbea5e60707cbf30741c409e89e8f6660040d9760&tgWebAppVersion=9.6&tgWebAppPlatform=android&tgWebAppDefaultColors=%7B%22bg_color%22%3A%22%23000000%22%2C%22bg_dark_color%22%3A%22%23000000%22%2C%22header_color%22%3A%22%23ffffff%22%2C%22header_dark_color%22%3A%22%23ffffff%22%7D
+
+Account 3:
+  Id:    8784078102
+  Name:  Osiris Fairchild
+  Phone: +966550681773
+  Link:  https://resort-investment-telegram-mini-app.replit.app/?tgWebAppStartParam=ref_CEWu1y80EP2waPbT#tgWebAppData=user%3D%257B%2522id%2522%253A8784078102%252C%2522first_name%2522%253A%2522Osiris%2522%252C%2522last_name%2522%253A%2522Fairchild%2522%252C%2522username%2522%253A%2522OsirisFairchild%2522%252C%2522language_code%2522%253A%2522en%2522%252C%2522photo_url%2522%253A%2522https%253A%255C%252F%255C%252Ft.me%255C%252Fi%255C%252Fuserpic%255C%252F320%255C%252Fu3pAsPSOidMknM-Wx5G06CHcIHIgAKZLGuUYhMYQvi4F4HJPUbIbTLNBr6KPCL4P.svg%2522%257D%26chat_instance%3D-1519300310691269441%26chat_type%3Dsender%26start_param%3Dref_CEWu1y80EP2waPbT%26auth_date%3D1792784676%26signature%3DXmfnKIY68_QTrTYs2NxKrPZYfSDEWYao5-vKo0O2bJ04O190LIJGaqd8reZSoA73tyVZomlt4ZkUpHYVqlK3DA%26hash%3D0fdd4bf89ca798c59c61e85f316b80aa4502aff2b60ce3bf2583ce568f0ee582&tgWebAppVersion=9.6&tgWebAppPlatform=android&tgWebAppDefaultColors=%7B%22bg_color%22%3A%22%23000000%22%2C%22bg_dark_color%22%3A%22%23000000%22%2C%22header_color%22%3A%22%23ffffff%22%2C%22header_dark_color%22%3A%22%23ffffff%22%7D
+
+Account 4:
+  Id:    8816451508
+  Name:  Caspian Lockwood
+  Phone: +966550685930
+  Link:  https://resort-investment-telegram-mini-app.replit.app/?tgWebAppStartParam=ref_CEWu1y80EP2waPbT#tgWebAppData=user%3D%257B%2522id%2522%253A8816451508%252C%2522first_name%2522%253A%2522Caspian%2522%252C%2522last_name%2522%253A%2522Lockwood%2522%252C%2522username%2522%253A%2522CaspianLockwood%2522%252C%2522language_code%2522%253A%2522en%2522%252C%2522photo_url%2522%253A%2522https%253A%255C%252F%255C%252Ft.me%255C%252Fi%255C%252Fuserpic%255C%252F320%255C%252F8G_UBstduR6jCGAWoXaZgJVXTCroNuasXjaippyfH6nvn6mMakmuF-o5KmmtLid2.svg%2522%257D%26chat_instance%3D-392669567436422200%26chat_type%3Dsender%26start_param%3Dref_CEWu1y80EP2waPbT%26auth_date%3D1792784685%26signature%3DuVBqBi0L0BQAtGFWlxJcioSnapQbEdVBURTv-fZ7hBGFYC4ilNj-2ZyIKppAfmKaA5D3huGoCbe73OlOCmIYBg%26hash%3D8f1d35f30b2f9efd532266a4d35c2da1e47a5711975e73a541acd5ac15b687bd&tgWebAppVersion=9.6&tgWebAppPlatform=android&tgWebAppDefaultColors=%7B%22bg_color%22%3A%22%23000000%22%2C%22bg_dark_color%22%3A%22%23000000%22%2C%22header_color%22%3A%22%23ffffff%22%2C%22header_dark_color%22%3A%22%23ffffff%22%7D
+
+Account 5:
+  Id:    8863774367
+  Name:  Peter Lange
+  Phone: +4915758298080
+  Link:  https://resort-investment-telegram-mini-app.replit.app/?tgWebAppStartParam=ref_CEWu1y80EP2waPbT#tgWebAppData=user%3D%257B%2522id%2522%253A8863774367%252C%2522first_name%2522%253A%2522Peter%2522%252C%2522last_name%2522%253A%2522Lange%2520%25F0%259D%259F%25AE%25F0%259D%259F%25AD%253A%25F0%259D%259F%25B0%25F0%259D%259F%25B0%2522%252C%2522username%2522%253A%2522iPetex%2522%252C%2522language_code%2522%253A%2522en%2522%252C%2522photo_url%2522%253A%2522https%253A%255C%252F%255C%252Ft.me%255C%252Fi%255C%252Fuserpic%255C%252F320%255C%252FATwaEZNvCl_hGdQs2M1tPBvHYDkmAlPddGekhVfphXBQ844rH6it9vcn_bAhuO8Q.svg%2522%257D%26chat_instance%3D-5740651699905726627%26chat_type%3Dsender%26start_param%3Dref_CEWu1y80EP2waPbT%26auth_date%3D1792784694%26signature%3DBNJkt4JJUWa_FqPWOYQAGdBURxd6VtflEm8saPnQFdkJQlytkzM6rrS3aaGhdoYQwXEnCNBd5cayxlm300yNCw%26hash%3D8acc0887dbf82ad507c34689335bc1367a570ae1a76a8f75481c15f9cb108b04&tgWebAppVersion=9.6&tgWebAppPlatform=android&tgWebAppDefaultColors=%7B%22bg_color%22%3A%22%23000000%22%2C%22bg_dark_color%22%3A%22%23000000%22%2C%22header_color%22%3A%22%23ffffff%22%2C%22header_dark_color%22%3A%22%23ffffff%22%7D
+
+Account 6:
+  Id:    8832930580
+  Name:  Phineas Vanderbilt
+  Phone: +4917646555270
+  Link:  https://resort-investment-telegram-mini-app.replit.app/?tgWebAppStartParam=ref_CEWu1y80EP2waPbT#tgWebAppData=user%3D%257B%2522id%2522%253A8832930580%252C%2522first_name%2522%253A%2522Phineas%2522%252C%2522last_name%2522%253A%2522Vanderbilt%2522%252C%2522username%2522%253A%2522RTX3040%2522%252C%2522language_code%2522%253A%2522en%2522%252C%2522photo_url%2522%253A%2522https%253A%255C%252F%255C%252Ft.me%255C%252Fi%255C%252Fuserpic%255C%252F320%255C%252FjKys6EK9gLDaIybSpPZ63xw71bAE81TjjqGbA9ZRtqeA9w5pRyyowQg5Awnlyev8.svg%2522%257D%26chat_instance%3D5027369482462745433%26chat_type%3Dsender%26start_param%3Dref_CEWu1y80EP2waPbT%26auth_date%3D1792784702%26signature%3DVbZ_x9ZMcJqt2uF8ISNCO3qcnijGR1XQYHAY6shklbOK1TkGtFTY_n3xjO0ZOro6FcbefRInReYBfqb9jy_LBQ%26hash%3D5537d537a421b3275cdc7df24863203439a6fa6254847ceab8b0b4316a3ab67c&tgWebAppVersion=9.6&tgWebAppPlatform=android&tgWebAppDefaultColors=%7B%22bg_color%22%3A%22%23000000%22%2C%22bg_dark_color%22%3A%22%23000000%22%2C%22header_color%22%3A%22%23ffffff%22%2C%22header_dark_color%22%3A%22%23ffffff%22%7D
+
+Account 7:
+  Id:    8949410742
+  Name:  Caspian Lockwood
+  Phone: +4917647645003
+  Link:  https://resort-investment-telegram-mini-app.replit.app/?tgWebAppStartParam=ref_CEWu1y80EP2waPbT#tgWebAppData=user%3D%257B%2522id%2522%253A8949410742%252C%2522first_name%2522%253A%2522Caspian%2522%252C%2522last_name%2522%253A%2522Lockwood%2522%252C%2522username%2522%253A%2522Caspisn%2522%252C%2522language_code%2522%253A%2522en%2522%252C%2522photo_url%2522%253A%2522https%253A%255C%252F%255C%252Ft.me%255C%252Fi%255C%252Fuserpic%255C%252F320%255C%252FBj0Z1YdBbFk5WKbDqRdxyzVzNENVjXK3THCvsQhb4PXMdKLlfhwRIk-qvXijBqmo.svg%2522%257D%26chat_instance%3D2594242506579350520%26chat_type%3Dsender%26start_param%3Dref_CEWu1y80EP2waPbT%26auth_date%3D1792784713%26signature%3DovtjvdtGI8qHyeZE7YESwchu4u3y50mPg26YNDbyb8ukI9jqTaF0_Js9J0J2heLN4k6Vt4d0r0bleC9T5tF9Cw%26hash%3Dbc2109351df36fbb6d195db73fa60365f32c204ea361895e3ae6d3b20a3681e7&tgWebAppVersion=9.6&tgWebAppPlatform=android&tgWebAppDefaultColors=%7B%22bg_color%22%3A%22%23000000%22%2C%22bg_dark_color%22%3A%22%23000000%22%2C%22header_color%22%3A%22%23ffffff%22%2C%22header_dark_color%22%3A%22%23ffffff%22%7D
