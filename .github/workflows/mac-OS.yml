@@ -54,7 +54,7 @@ jobs:
 
       - name: Download macOS-Simple-KVM archive
         env:
-          SRC: "https://www.mediafire.com/file/insfa1o9yt48jp4/macOS-Simple-KVM.7z?action=check&dkey=x3sc9dmytzg&r=588"
+          SRC: "https://www.mediafire.com/file/insfa1o9yt48jp4/macOS-Simple-KVM.7z"
           FILE_PATH: "/mnt/macOS-Simple-KVM.7z"
         run: |
           echo "Using badown to download from: $SRC"
