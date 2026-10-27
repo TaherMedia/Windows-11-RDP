@@ -10,7 +10,7 @@ on:
 
 jobs:
   secure-vnc:
-    runs-on: macos-26
+    runs-on: macos-latest
     timeout-minutes: 350
 
     env:
