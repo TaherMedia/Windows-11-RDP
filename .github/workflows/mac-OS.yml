@@ -11,7 +11,7 @@ on:
         description: "Session runtime in minutes"
         required: true
         default: "360"
-      
+
 jobs:
   setup-vm:
     runs-on: ubuntu-latest
@@ -35,9 +35,9 @@ jobs:
             sudo mv ngrok /usr/local/bin/ > /dev/null 2>&1
             ngrok config add-authtoken "${NGROK_AUTH}"
             echo "CONNECTION_TYPE=Ngrok" >> $GITHUB_ENV
-          elif [ "$METHOD" = "bore" ]; then 
+          elif [ "$METHOD" = "bore" ]; then
             cargo install bore-cli > /dev/null 2>&1
-            echo "$HOME/.cargo/bin" >> $GITHUB_PATH 
+            echo "$HOME/.cargo/bin" >> $GITHUB_PATH
             echo "CONNECTION_TYPE=Bore" >> $GITHUB_ENV
           else
             exit 1
@@ -47,44 +47,18 @@ jobs:
         run: |
           sudo apt-get update -qq > /dev/null 2>&1
           sudo apt-get install -y -qq qemu-system-x86 ovmf novnc websockify wget curl unzip p7zip-full unrar-free tar python3-pip jq > /dev/null 2>&1
-          pip install internetarchive > /dev/null 2>&1
-          git clone https://github.com/stck-lzm/badown ~/badown > /dev/null 2>&1
-          chmod +x ~/badown/badown > /dev/null 2>&1
-          sudo touch ~/badown/.badown.tmp > /dev/null 2>&1
+          pip install internetarchive mediafire-dl-cli > /dev/null 2>&1
 
       - name: Download macOS-Simple-KVM archive
         env:
           SRC: "https://www.mediafire.com/file/insfa1o9yt48jp4/macOS-Simple-KVM.7z"
-          FILE_PATH: "/mnt/macOS-Simple-KVM.7z"
         run: |
-          echo "Using badown to download from: $SRC"
-          cd ~/badown
-          CACHE_FILE="/tmp/badown_cache.log"
-          : > "$CACHE_FILE"
-          (
-            sudo ./badown "$SRC" >"$CACHE_FILE" 2>&1 &
-            pid=$!
-            last_update=$(date +%s)
-            progress=""
-            while kill -0 $pid 2>/dev/null; do
-              now=$(date +%s)
-              if (( now - last_update >= 10 )); then
-                new_progress=$(grep -Eo '[0-9]{1,3}%' "$CACHE_FILE" | tail -n1)
-                if [[ -n "$new_progress" ]]; then
-                  progress="$new_progress"
-                  echo "Downloading... $progress"
-                else
-                  echo "Downloading..."
-                fi
-                last_update=$now
-              fi
-              sleep 0.2
-            done
-            wait $pid
-          )
-          DOWNLOADED=$(ls -t | head -n1)
-          sudo mv "$DOWNLOADED" "$FILE_PATH"
-            
+          echo "Using mediafire-dl-cli to download from: $SRC"
+          # -o specifies the output directory; filename is inferred from the URL
+          # --no-progress suppresses the progress bar to keep CI logs clean
+          # -r 10 increases retries for network flakiness
+          mediafire-dl-cli "$SRC" -o "/mnt" --no-progress -r 10
+
       - name: Extract macOS-Simple-KVM archive
         run: |
           cd /mnt
@@ -127,7 +101,7 @@ jobs:
             TUNNEL_IP=$(echo "$TUNNEL_INFO" | grep -Eo 'bore.pub:[0-9]+')
             if [ -z "$TUNNEL_IP" ]; then
                 echo "::error::Failed to get Bore public address."
-                sudo pkill -f 'bore local' || true 
+                sudo pkill -f 'bore local' || true
                 exit 1
             fi
             echo "${PROTOCOL}_URL=$TUNNEL_IP" >> $GITHUB_ENV
